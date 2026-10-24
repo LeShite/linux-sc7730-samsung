@@ -513,6 +513,14 @@ config SPRD_TIMER
 	help
 	  Enables support for the Spreadtrum timer driver.
 
+config SPRD_SC8830_TIMER
+	bool "Spreadtrum SC8830 family timer driver" if COMPILE_TEST
+	depends on HAS_IOMEM
+	select TIMER_OF
+	help
+	  Enables support for the timers of 32-bit Spreadtrum SC8830 family
+	  SoCs, such as the SC7730.
+
 config SYS_SUPPORTS_SH_MTU2
 	bool
 

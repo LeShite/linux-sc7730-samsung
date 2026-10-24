@@ -1,0 +1,82 @@
+// SPDX-License-Identifier: GPL-2.0
+/*
+ * Samsung Galaxy Tab A 7.0 (2016) Wi-Fi (SM-T280, gtexswifi)
+ */
+
+/dts-v1/;
+
+#include "sc7730.dtsi"
+
+/ {
+	model = "Samsung Galaxy Tab A 7.0 (2016) Wi-Fi";
+	compatible = "samsung,gtexswifi", "sprd,sc7730";
+	chassis-type = "tablet";
+
+	/* SBOOT picks the DTB out of dt.img by this id and the board revision */
+	sprd,sc-id = <8830 5 0x20000>;
+
+	chosen {
+		#address-cells = <1>;
+		#size-cells = <1>;
+		ranges;
+
+		/* SBOOT writes its own bootargs here; the kernel uses CONFIG_CMDLINE */
+		bootargs = "";
+
+		/* SBOOT leaves the panel running and scanning out lcd_base */
+		framebuffer@9ea48000 {
+			compatible = "simple-framebuffer";
+			reg = <0x9ea48000 (800 * 1280 * 4)>;
+			width = <800>;
+			height = <1280>;
+			stride = <(800 * 4)>;
+			format = "a8r8g8b8";
+		};
+	};
+
+	memory@80000000 {
+		device_type = "memory";
+		reg = <0x80000000 0x60000000>;
+	};
+
+	reserved-memory {
+		#address-cells = <1>;
+		#size-cells = <1>;
+		ranges;
+
+		/* Samsung sec_debug and sec_log buffers */
+		sec-log@86a00000 {
+			reg = <0x86a00000 0x200000>;
+			no-map;
+		};
+
+		/* IPC shared memory and modem images loaded by SBOOT */
+		smem@87800000 {
+			reg = <0x87800000 0x400000>;
+			no-map;
+		};
+
+		modem@88000000 {
+			reg = <0x88000000 0x1d00000>;
+			no-map;
+		};
+
+		/* triple-buffered vendor framebuffer, first buffer is lcd_base */
+		framebuffer@9ea48000 {
+			reg = <0x9ea48000 0xbb8000>;
+			no-map;
+		};
+
+		/*
+		 * Vendor ION carveout. TWRP's kernel never touches it, so a
+		 * log left here can be read back from /dev/mem after a reboot.
+		 */
+		ramoops@9f600000 {
+			compatible = "ramoops";
+			reg = <0x9f600000 0x100000>;
+			record-size = <0x20000>;
+			console-size = <0x80000>;
+			no-map;
+		};
+	};
+};

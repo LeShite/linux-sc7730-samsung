@@ -163,6 +163,16 @@ config ARCH_RDA
 	help
 	  This enables support for the RDA Micro 8810PL SoC family.
 
+config ARCH_SPRD
+	bool "Spreadtrum (Unisoc) SoCs"
+	depends on ARCH_MULTI_V7
+	select ARM_GIC
+	select SPRD_SC8830_TIMER
+	help
+	  This enables support for 32-bit Spreadtrum SoCs of the SC8830
+	  family, such as the SC7730 used in the Samsung Galaxy Tab A 7.0
+	  (2016).
+
 menuconfig ARCH_SUNPLUS
 	bool "Sunplus SoCs"
 	depends on ARCH_MULTI_V7
