@@ -699,6 +699,14 @@ config MMC_SDHCI_SPRD
 
 	  If unsure, say N.
 
+config MMC_SDHCI_SPRD_SC8830
+	tristate "Spreadtrum SC8830 family SD host controller"
+	depends on ARCH_SPRD || COMPILE_TEST
+	depends on MMC_SDHCI_PLTFM
+	help
+	  This selects the "sdhost 3.0" SD/eMMC controller of 32-bit
+	  Spreadtrum SC8830 family SoCs such as the SC7730.
+
 config MMC_TMIO_CORE
 	tristate
 

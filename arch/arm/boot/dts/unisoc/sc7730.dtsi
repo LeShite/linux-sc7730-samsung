@@ -91,6 +91,24 @@
 			clocks = <&clk32k>;
 		};
 
+		/* SD card slot (vendor "sdio0") */
+		sdc: mmc@20300000 {
+			compatible = "sprd,sc8830-sdhci";
+			reg = <0x20300000 0x1000>;
+			interrupts = <GIC_SPI 57 IRQ_TYPE_LEVEL_HIGH>;
+			sprd,delays = <0x3 0x3 0x3>;
+			status = "disabled";
+		};
+
+		/* eMMC (vendor "sdio3"), set up by the bootloader */
+		emmc: mmc@20600000 {
+			compatible = "sprd,sc8830-sdhci";
+			reg = <0x20600000 0x1000>;
+			interrupts = <GIC_SPI 60 IRQ_TYPE_LEVEL_HIGH>;
+			sprd,delays = <0xa 0x2 0x2>;
+			status = "disabled";
+		};
+
 		gpu: gpu@60000000 {
 			compatible = "arm,mali-400";
 			reg = <0x60000000 0x10000>;
