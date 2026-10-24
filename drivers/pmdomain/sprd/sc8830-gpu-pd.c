@@ -81,9 +81,12 @@ static int sc8830_gpu_pd_probe(struct platform_device *pdev)
 	if (IS_ERR(pd->pmu) || IS_ERR(pd->aon) || IS_ERR(pd->gpu))
 		return -EINVAL;
 
-	dev_info(&pdev->dev, "before: pd_cfg %08x eb0 %08x clk %08x rst %08x\n",
-		 readl(pd->pmu), readl(pd->aon),
-		 readl(pd->gpu + SC8830_GPU_APB_CLK_CTRL), readl(pd->gpu));
+	/*
+	 * Only the always-on PMU and AON registers here: the GPU APB block
+	 * sits inside the domain and must not be touched while it is off.
+	 */
+	dev_info(&pdev->dev, "before: pd_cfg %08x eb0 %08x\n",
+		 readl(pd->pmu), readl(pd->aon));
 
 	pd->genpd.name = "gpu";
 	pd->genpd.power_on = sc8830_gpu_pd_power_on;
