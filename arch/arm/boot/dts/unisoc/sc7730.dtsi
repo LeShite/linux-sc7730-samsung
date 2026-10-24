@@ -12,7 +12,7 @@
 / {
 	#address-cells = <1>;
 	#size-cells = <1>;
-	interrupt-parent = <&gic>;
+	interrupt-parent = <&intc>;
 
 	cpus {
 		#address-cells = <1>;
@@ -62,6 +62,24 @@
 			      <0x12002000 0x2000>;
 			interrupt-controller;
 			#interrupt-cells = <3>;
+			interrupt-parent = <&gic>;
+		};
+
+		/*
+		 * Wakeup mirror of the GIC: with all cores in WFI the GIC clock
+		 * stops and only sources enabled here can wake the system.
+		 */
+		intc: interrupt-controller@71400000 {
+			compatible = "sprd,sc8830-intc";
+			reg = <0x71400000 0x1000>,
+			      <0x71500000 0x1000>,
+			      <0x71600000 0x1000>,
+			      <0x71700000 0x1000>,
+			      <0x71300000 0x4>;
+			reg-names = "intc0", "intc1", "intc2", "intc3", "eb";
+			interrupt-controller;
+			#interrupt-cells = <3>;
+			interrupt-parent = <&gic>;
 		};
 
 		/* AON GPTIMER0; the second range holds the AON APB clock gates */

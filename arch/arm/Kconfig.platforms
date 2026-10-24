@@ -167,6 +167,7 @@ config ARCH_SPRD
 	bool "Spreadtrum (Unisoc) SoCs"
 	depends on ARCH_MULTI_V7
 	select ARM_GIC
+	select SPRD_SC8830_INTC
 	select SPRD_SC8830_TIMER
 	help
 	  This enables support for 32-bit Spreadtrum SoCs of the SC8830
