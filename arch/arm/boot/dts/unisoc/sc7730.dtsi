@@ -17,6 +17,7 @@
 	cpus {
 		#address-cells = <1>;
 		#size-cells = <0>;
+		enable-method = "sprd,sc8830-smp";
 
 		cpu0: cpu@f00 {
 			device_type = "cpu";
@@ -97,6 +98,18 @@
 			      <0x402e0000 0x8>;
 			interrupts = <GIC_SPI 28 IRQ_TYPE_LEVEL_HIGH>;
 			clocks = <&clk32k>;
+		};
+
+		/* holding pen, jump and reset registers of the secondary cores */
+		ap_ahb: syscon@20d00000 {
+			compatible = "sprd,sc8830-ap-ahb";
+			reg = <0x20d00000 0x1000>;
+		};
+
+		/* power domains of cores 1-3 (gpu_pd also maps parts of it) */
+		pmu_apb: syscon@402b0000 {
+			compatible = "sprd,sc8830-pmu-apb";
+			reg = <0x402b0000 0x1000>;
 		};
 
 		/* SD card slot (vendor "sdio0") */
