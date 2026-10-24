@@ -57,6 +57,16 @@ config DRM_SIMPLEDRM
 	  On x86 BIOS or UEFI systems, you should also select SYSFB_SIMPLEFB
 	  to use UEFI and VESA framebuffers.
 
+config DRM_SIMPLEDRM_NAME
+	string "DRM driver name reported by simpledrm"
+	depends on DRM_SIMPLEDRM
+	default "simpledrm"
+	help
+	  Userspace sees this name in drmGetVersion(). Mesa picks its driver
+	  from it, and a render-only GPU (such as a Mali-400 under Lima)
+	  only gets used through kmsro when the display driver has a name
+	  Mesa knows, for example "sun4i-drm".
+
 config DRM_VESADRM
 	tristate "VESA framebuffer driver"
 	depends on DRM && MMU && X86 && (!SYSFB_SIMPLEFB || COMPILE_TEST)

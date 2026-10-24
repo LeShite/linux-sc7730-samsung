@@ -1,0 +1,10 @@
+# SPDX-License-Identifier: GPL-2.0-only
+
+config SPRD_SC8830_GPU_PD
+	bool "Spreadtrum SC8830 family GPU power domain"
+	depends on ARCH_SPRD || COMPILE_TEST
+	depends on PM
+	select PM_GENERIC_DOMAINS
+	help
+	  Powers up the Mali-400 GPU of 32-bit Spreadtrum SC8830 family SoCs
+	  such as the SC7730, so that the Lima driver can use it.

@@ -10,6 +10,7 @@ obj-y					+= mediatek/
 obj-y					+= qcom/
 obj-y					+= renesas/
 obj-y					+= rockchip/
+obj-y					+= sprd/
 obj-y					+= samsung/
 obj-y					+= st/
 obj-y					+= starfive/
