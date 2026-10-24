@@ -36,18 +36,33 @@ static void sc8830_gpu_pd_rmw(void __iomem *reg, u32 clr, u32 set)
 	writel((readl(reg) & ~clr) | set, reg);
 }
 
+/*
+ * Bring-up aid: announce each step and give the deferred fbcon flush time to
+ * reach the panel, so that a bus hang leaves the failing step on screen.
+ */
+static void sc8830_gpu_pd_step(struct generic_pm_domain *genpd, const char *what)
+{
+	pr_info("sc8830-gpu-pd: %s\n", what);
+	msleep(200);
+}
+
 static int sc8830_gpu_pd_power_on(struct generic_pm_domain *genpd)
 {
 	struct sc8830_gpu_pd *pd = container_of(genpd, struct sc8830_gpu_pd, genpd);
 
+	sc8830_gpu_pd_step(genpd, "paso 1/3: energia (PD_GPU_TOP)");
 	sc8830_gpu_pd_rmw(pd->pmu, SC8830_PD_GPU_TOP_FORCE_SHUTDOWN |
 			  SC8830_PD_GPU_TOP_AUTO_SHUTDOWN_EN, 0);
 	usleep_range(200, 300);
+	sc8830_gpu_pd_step(genpd, "paso 2/3: habilitar (GPU_EB)");
 	sc8830_gpu_pd_rmw(pd->aon, 0, SC8830_AON_APB_EB0_GPU_EB);
+	usleep_range(10, 20);
+	sc8830_gpu_pd_step(genpd, "paso 3/3: reloj 384 MHz (GPU APB)");
 	sc8830_gpu_pd_rmw(pd->gpu + SC8830_GPU_APB_CLK_CTRL,
 			  SC8830_GPU_CLK_SEL_MASK | SC8830_GPU_CLK_DIV_MASK,
 			  SC8830_GPU_CLK_SEL_384M);
 	usleep_range(10, 20);
+	sc8830_gpu_pd_step(genpd, "GPU encendida");
 
 	return 0;
 }
@@ -117,4 +132,13 @@ static struct platform_driver sc8830_gpu_pd_driver = {
 		.suppress_bind_attrs = true,
 	},
 };
-builtin_platform_driver(sc8830_gpu_pd_driver);
+
+/*
+ * Late, so that the console is already on the panel if powering the GPU
+ * goes wrong; Lima simply defers until this domain shows up.
+ */
+static int __init sc8830_gpu_pd_init(void)
+{
+	return platform_driver_register(&sc8830_gpu_pd_driver);
+}
+late_initcall(sc8830_gpu_pd_init);
