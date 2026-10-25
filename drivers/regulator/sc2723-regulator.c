@@ -18,11 +18,13 @@
  */
 
 #include <linux/bitfield.h>
+#include <linux/delay.h>
 #include <linux/io.h>
 #include <linux/iopoll.h>
 #include <linux/module.h>
 #include <linux/of.h>
 #include <linux/platform_device.h>
+#include <linux/reboot.h>
 #include <linux/regulator/driver.h>
 #include <linux/regulator/of_regulator.h>
 #include <linux/spinlock.h>
@@ -35,6 +37,13 @@
 #define ADI_RD_DATA_VAL		GENMASK(15, 0)
 #define ADI_FIFO_STS		0x2c
 #define ADI_FIFO_EMPTY		BIT(10)
+
+/* power-off (vendor sc8830_power_off(), SC2723S): every LDO and DC-DC down */
+#define ANA_GLB_LDO_DCDC_PD	0x0810
+#define ANA_GLB_LDO_PD_CTRL	0x0814
+#define ANA_GLB_PWR_WR_PROT	0x0950
+#define  PWR_WR_PROT		BIT(15)
+#define  PWR_WR_PROT_KEY	0x6e7f
 
 #define SC2723_LDO_MIN_UV	1200000
 #define SC2723_LDO_STEP_UV	10000
@@ -95,6 +104,32 @@ static int sc2723_update(struct sc2723 *pmic, u32 reg, u16 mask, u16 val)
 	spin_unlock_irqrestore(&pmic->lock, flags);
 
 	return ret;
+}
+
+static void sc2723_write(struct sc2723 *pmic, u32 reg, u16 val)
+{
+	u32 sts;
+
+	writel(val, pmic->win + reg);
+	readl_poll_timeout_atomic(pmic->adi + ADI_FIFO_STS, sts, sts & ADI_FIFO_EMPTY, 1, 1000);
+}
+
+/* the vendor's sequence: LDOs off, unlock the power registers, then all LDOs and DC-DCs off */
+static int sc2723_power_off(struct sys_off_data *data)
+{
+	struct sc2723 *pmic = data->cb_data;
+	u16 prot = 0;
+	int i;
+
+	sc2723_write(pmic, ANA_GLB_LDO_PD_CTRL, 0x1fff);
+	sc2723_write(pmic, ANA_GLB_PWR_WR_PROT, PWR_WR_PROT_KEY);
+	for (i = 0; i < 1000 && !(prot & PWR_WR_PROT); i++)
+		if (sc2723_read(pmic, ANA_GLB_PWR_WR_PROT, &prot))
+			prot = 0;
+	sc2723_write(pmic, ANA_GLB_LDO_PD_CTRL, 0xfff);
+	sc2723_write(pmic, ANA_GLB_LDO_DCDC_PD, 0x7fff);
+	mdelay(1000);
+	return NOTIFY_DONE;
 }
 
 static struct sc2723_ldo *rdev_to_ldo(struct regulator_dev *rdev)
@@ -247,6 +282,9 @@ static int sc2723_probe(struct platform_device *pdev)
 		}
 	}
 
+	ret = devm_register_power_off_handler(&pdev->dev, sc2723_power_off, pmic);
+	if (ret)
+		dev_warn(&pdev->dev, "no power-off handler: %d\n", ret);
 	return 0;
 }
 
