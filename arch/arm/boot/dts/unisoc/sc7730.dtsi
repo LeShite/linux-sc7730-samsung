@@ -153,6 +153,14 @@
 			reg-names = "adi", "pmic";
 		};
 
+		/* Buttons: power and volume down on the PMIC's EIC, volume up and home on the keypad */
+		keys@40250000 {
+			compatible = "sprd,sc8830-keys";
+			reg = <0x40250000 0x1000>, <0x402e0000 0x4000>,
+			      <0x40030000 0x1000>, <0x40038000 0x1000>;
+			reg-names = "keypad", "aon", "adi", "pmic";
+		};
+
 		/* Speaker playback: VBC + AP DMA (channels 24/25) + SC2723S codec */
 		audio@40020000 {
 			compatible = "sprd,sc8830-audio";

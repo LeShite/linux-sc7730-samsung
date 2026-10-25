@@ -671,6 +671,14 @@ config KEYBOARD_OMAP4
 	  To compile this driver as a module, choose M here: the
 	  module will be called omap4-keypad.
 
+config KEYBOARD_SC8830
+	tristate "Spreadtrum SC8830 (SC7730) buttons"
+	depends on ARCH_SPRD || COMPILE_TEST
+	help
+	  Power, volume and home buttons of the Samsung Galaxy Tab A 7.0
+	  (SM-T280): the SC2723S PMIC's EIC lines and the SoC's keypad
+	  controller, polled.
+
 config KEYBOARD_SPEAR
 	tristate "ST SPEAR keyboard support"
 	depends on PLAT_SPEAR || COMPILE_TEST
