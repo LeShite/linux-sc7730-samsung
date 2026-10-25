@@ -554,6 +554,12 @@ static irqreturn_t sc8830_dma_irq(int irq, void *data)
 
 	if ((sts & BIT(DMA_CH_LEFT)) && sa->substream) {
 		sa->irqs++;
+		if (sa->irqs <= 6 || sa->irqs % 500 == 0) {
+			struct snd_pcm_runtime *rt = sa->substream->runtime;
+
+			dev_info_ratelimited(sa->dev, "period %u: hw=%lu appl=%lu\n", sa->irqs,
+					     (unsigned long)rt->status->hw_ptr, (unsigned long)rt->control->appl_ptr);
+		}
 		snd_pcm_period_elapsed(sa->substream);
 	}
 	return IRQ_HANDLED;
@@ -710,12 +716,10 @@ static int sc8830_pcm_trigger(struct snd_pcm_substream *substream, int cmd)
 		{
 			struct snd_pcm_runtime *rt = substream->runtime;
 
-			/* an xrun stops the stream from here: tell the two pointers apart from a normal stop */
-			if (rt->status->state == SNDRV_PCM_STATE_RUNNING)
-				dev_info_ratelimited(sa->dev, "stop while running (xrun?): hw=%lu appl=%lu buffer=%lu period=%lu\n",
-						     (unsigned long)rt->status->hw_ptr,
-						     (unsigned long)rt->control->appl_ptr,
-						     rt->buffer_size, rt->period_size);
+			/* bring-up aid: did this stream ever carry data? (appl moves only if it was written) */
+			dev_info_ratelimited(sa->dev, "stop: state=%d periods=%u hw=%lu appl=%lu buffer=%lu period=%lu\n",
+					     rt->status->state, sa->irqs, (unsigned long)rt->status->hw_ptr,
+					     (unsigned long)rt->control->appl_ptr, rt->buffer_size, rt->period_size);
 		}
 		upd(sa->vbc, VBDABUFFDTA, VBENABLE | VBDA0DMA_EN | VBDA1DMA_EN, 0);
 		upd(sa->vbc, VBCHNEN, VBDA0_EN | VBDA1_EN, 0);
