@@ -356,6 +356,49 @@ struct sc8830_audio {
 	struct delayed_work jack;	/* polls the jack, also while nothing plays */
 	bool chip_aa;			/* SC2723 version AA: DANGL/DANGR with the class-G amp */
 	bool low_power;			/* SC2723 E/T/M (this tablet: M): the vendor's low-power settings */
+	bool vbc_vendor;		/* DAHPCTL as the vendor's (EQ6 flat, ALC): "VBC Vendor Profile" */
+};
+
+/*
+ * HPCOEF0-43 (0x100-0x25c), the DA EQ6 and EQ4 coefficients as the vendor kernel leaves them
+ * while it plays cleanly under TWRP (/proc/asound/sprdphone/vbc): flat bands, with DAHPCTL
+ * 0x0d7f (EQ6 and ALC on). Our VBC had them all zero and DAHPCTL 0.
+ */
+#define VBC_HPCOEF0		0x0100
+#define VBC_DAHPCTL_VENDOR	0x0d7f
+static const u16 vbc_hpcoef_vendor[] = {
+	0x1000, 0x0000, 0x4000, 0x0000
+, 0x4000, 0x0000, 0x0000, 0x0000
+,
+	0x0000, 0x0000, 0x0000, 0x0000
+, 0x0000, 0x0000, 0x1000, 0x0000
+,
+	0x4000, 0x0000, 0x4000, 0x0000
+, 0x0000, 0x0000, 0x0000, 0x0000
+,
+	0x0000, 0x0000, 0x0000, 0x0000
+, 0x1000, 0x0000, 0x4000, 0x0000
+,
+	0x4000, 0x0000, 0x0000, 0x0000
+, 0x0000, 0x0000, 0x0000, 0x0000
+,
+	0x0000, 0x0000, 0x1000, 0x0000
+, 0x4000, 0x0000, 0x4000, 0x0000
+,
+	0x0000, 0x0000, 0x0000, 0x0000
+, 0x0000, 0x0000, 0x0000, 0x0000
+,
+	0x1000, 0x0000, 0x4000, 0x0000
+, 0x4000, 0x0000, 0x0000, 0x0000
+,
+	0x0000, 0x0000, 0x0000, 0x0000
+, 0x0000, 0x0000, 0x1000, 0x0000
+,
+	0x4000, 0x0000, 0x4000, 0x0000
+, 0x0000, 0x0000, 0x0000, 0x0000
+,
+	0x0000, 0x0000, 0x0000, 0x0000
+, 0x1000, 0x0000, 0x0000, 0x0000
 };
 
 /* DAALCCTL0-10 of the vendor's default DA profile (vbc_da_eq_profile_default) */
@@ -1054,7 +1097,9 @@ static int sc8830_pcm_prepare(struct snd_pcm_substream *substream)
 	writel(0x0183, sa->vbc + STCTL1);
 	writel(0, sa->vbc + DACSRCCTL);
 	writel(0, sa->vbc + MIXERCTL);
-	writel(0, sa->vbc + DAHPCTL);
+	for (i = 0; i < ARRAY_SIZE(vbc_hpcoef_vendor); i++)
+		writel(vbc_hpcoef_vendor[i], sa->vbc + VBC_HPCOEF0 + 4 * i);
+	writel(sa->vbc_vendor ? VBC_DAHPCTL_VENDOR : 0, sa->vbc + DAHPCTL);
 	apply_vbc(sa);
 
 	for (side = 0; side < 2; side++) {
@@ -1390,6 +1435,26 @@ static int alc_put(struct snd_kcontrol *kc, struct snd_ctl_elem_value *uc)
 	return changed;
 }
 
+static int vbc_vendor_get(struct snd_kcontrol *kc, struct snd_ctl_elem_value *uc)
+{
+	uc->value.integer.value[0] = ((struct sc8830_audio *)snd_kcontrol_chip(kc))->vbc_vendor;
+	return 0;
+}
+
+/* takes effect at the next stream start (prepare) */
+static int vbc_vendor_put(struct snd_kcontrol *kc, struct snd_ctl_elem_value *uc)
+{
+	struct sc8830_audio *sa = snd_kcontrol_chip(kc);
+	bool on = !!uc->value.integer.value[0];
+	int changed;
+
+	mutex_lock(&sa->lock);
+	changed = sa->vbc_vendor != on;
+	sa->vbc_vendor = on;
+	mutex_unlock(&sa->lock);
+	return changed;
+}
+
 static int vbc_dg_info(struct snd_kcontrol *kc, struct snd_ctl_elem_info *uinfo)
 {
 	uinfo->type = SNDRV_CTL_ELEM_TYPE_INTEGER;
@@ -1587,6 +1652,13 @@ static const struct snd_kcontrol_new sc8830_controls[] = {
 	},
 	{
 		.iface = SNDRV_CTL_ELEM_IFACE_MIXER,
+		.name = "VBC Vendor Profile",
+		.info = snd_ctl_boolean_mono_info,
+		.get = vbc_vendor_get,
+		.put = vbc_vendor_put,
+	},
+	{
+		.iface = SNDRV_CTL_ELEM_IFACE_MIXER,
 		.name = "VBC Digital Gain",
 		.info = vbc_dg_info,
 		.get = vbc_dg_get,
@@ -1670,6 +1742,16 @@ static ssize_t adi_show(struct device *dev, struct device_attribute *attr, char 
 	for (i = 0; i < ARRAY_SIZE(adi_dump_regs); i++)
 		len += sysfs_emit_at(buf, len, "%03x=%04x ", adi_dump_regs[i],
 				     adi_get(sa, adi_dump_regs[i]));
+	/* the vendor's /proc/asound/sprdphone/{sprd-codec,vbc} layout, to diff against TWRP */
+	len += sysfs_emit_at(buf, len, "\ncodec digital (clock %s)", sa->powered ? "on" : "off");
+	for (i = 0; sa->powered && i < 0x40; i += 4)
+		len += sysfs_emit_at(buf, len, "%s%04x", i % 16 ? " " : "\n", readl(sa->codec + i) & 0xffff);
+	len += sysfs_emit_at(buf, len, "\nvbc");
+	for (i = 0; sa->powered && i < 0x200; i += 4) {
+		if (i % 16 == 0)
+			len += sysfs_emit_at(buf, len, "\n0x%04x |", i);
+		len += sysfs_emit_at(buf, len, " %04x", readl(sa->vbc + i) & 0xffff);
+	}
 	mutex_unlock(&sa->lock);
 	len += sysfs_emit_at(buf, len, "\n");
 	return len;
@@ -1744,16 +1826,17 @@ static int sc8830_audio_probe(struct platform_device *pdev)
 	sa->fifo = VBC_FIFO_FRAMES;
 	sa->spk_on = true;
 	/*
-	 * Tuned by ear. The vendor's ALC limiter is off. The speaker amp input sums both DACs and clipped
-	 * stereo, so only the left DAC is routed. DAC at 0 dB; the amp at 0 dB too (boost 0): +6 dB was
-	 * clean with the synthetic test music but real music distorted, +12 dB distorted even that.
-	 * The stereo downmix (MIX_DOWNMIX with write_mode on: no mmap, .copy mixes) worked with aplay but
-	 * left Batocera silent through PipeWire, so it is off by default.
+	 * The speaker as the vendor kernel plays it cleanly under TWRP (registers read back while it
+	 * played): both DACs into the amp (ANA_CDC6 0x3000), DAC at -3 dB (ANA_CDC10 0x2400), amp at
+	 * +6 dB (AOL_G 10 = volume 8 + boost 2). Earlier, tuned by ear without the vendor's VBC set-up
+	 * (EQ6 flat, ALC), only the left DAC at 0 dB seemed bearable.
 	 */
-	sa->dac_gain = 7;
-	sa->alc = false;
-	sa->boost = 0;
-	sa->mix = MIX_LEFT;
+	sa->dac_gain = 1;
+	/* the VBC exactly as the vendor kernel plays it under TWRP: EQ6 flat bands and the ALC on */
+	sa->vbc_vendor = true;
+	sa->alc = true;
+	sa->boost = 2;
+	sa->mix = MIX_LR;
 	sa->write_mode = false;
 	/* the EIC jack line works (high = plugged in): headphones when plugged, else the speaker */
 	sa->out = OUT_AUTO;
