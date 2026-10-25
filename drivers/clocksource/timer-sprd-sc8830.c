@@ -3,18 +3,27 @@
  * Spreadtrum SC8830 family (SC7730, SC7715, ...) timer driver
  *
  * Each timer block holds three 32-bit down counters spaced 0x20 apart.
- * Timer 0 is used for clockevents and timer 1 as free-running clocksource
- * and sched_clock. The register layout follows the vendor 3.10 kernel
- * (drivers/platform/sprd/timer_sc8830.c).
+ * Every CPU gets the first timer of its own block as local clockevent, as
+ * in the vendor kernel: CPU0 the AON GPTIMER0, CPUs 1-3 the AP timers 0-2.
+ * The second timer of GPTIMER0 is the free-running clocksource and
+ * sched_clock. All of them run at 32768 Hz. The register layout follows the
+ * vendor 3.10 kernel (drivers/platform/sprd/timer_sc8830.c).
+ *
+ * DT: reg = GPTIMER0, AON APB EB0/EB1 clock gates, then one block per
+ * secondary CPU; interrupts = one per CPU.
  */
 
 #include <linux/bitops.h>
+#include <linux/clk.h>
+#include <linux/clockchips.h>
+#include <linux/clocksource.h>
+#include <linux/cpu.h>
 #include <linux/init.h>
 #include <linux/interrupt.h>
+#include <linux/irq.h>
 #include <linux/of_address.h>
+#include <linux/of_irq.h>
 #include <linux/sched_clock.h>
-
-#include "timer-of.h"
 
 #define SC8830_TIMER_LOAD(n)	(0x20 * (n) + 0x00)
 #define SC8830_TIMER_CTL(n)	(0x20 * (n) + 0x08)
@@ -32,12 +41,28 @@
 #define SC8830_EVENT_TIMER	0
 #define SC8830_SOURCE_TIMER	1
 #define SC8830_NUM_TIMERS	3
+#define SC8830_MAX_CPUS		4
 
-/* AON APB clock gates, the optional second register range */
+/* AON APB clock gates, the second register range */
 #define SC8830_AON_APB_EB0	0x0
-#define SC8830_AON_APB_EB0_TMR	(BIT(10) | BIT(11) | BIT(12))
+#define SC8830_AON_APB_EB0_TMR	(BIT(10) | BIT(11) | BIT(12))	/* AP_SYST, AON_TMR, AP_TMR0 */
+#define SC8830_AON_APB_EB1	0x4
+#define SC8830_AON_APB_EB1_TMR	(BIT(9) | BIT(10))		/* AP_TMR1, AP_TMR2 */
 
+struct sc8830_timer {
+	struct clock_event_device evt;
+	void __iomem *base;
+	int irq;
+};
+
+static struct sc8830_timer sc8830_timers[SC8830_MAX_CPUS];
 static void __iomem *sc8830_source_base;
+static unsigned long sc8830_timer_rate;
+
+static inline void __iomem *sc8830_evt_base(struct clock_event_device *evt)
+{
+	return container_of(evt, struct sc8830_timer, evt)->base;
+}
 
 static void sc8830_timer_ctl(void __iomem *base, int n, u32 ctl)
 {
@@ -67,7 +92,7 @@ static void sc8830_timer_wait_load(void __iomem *base, int n)
 static int sc8830_timer_set_next_event(unsigned long cycles,
 				       struct clock_event_device *evt)
 {
-	void __iomem *base = timer_of_base(to_timer_of(evt));
+	void __iomem *base = sc8830_evt_base(evt);
 
 	sc8830_timer_wait_load(base, SC8830_EVENT_TIMER);
 	sc8830_timer_ctl(base, SC8830_EVENT_TIMER, 0);
@@ -79,11 +104,10 @@ static int sc8830_timer_set_next_event(unsigned long cycles,
 
 static int sc8830_timer_set_periodic(struct clock_event_device *evt)
 {
-	struct timer_of *to = to_timer_of(evt);
-	void __iomem *base = timer_of_base(to);
+	void __iomem *base = sc8830_evt_base(evt);
 
 	sc8830_timer_ctl(base, SC8830_EVENT_TIMER, SC8830_TIMER_CTL_PERIOD);
-	writel_relaxed(timer_of_period(to),
+	writel_relaxed(DIV_ROUND_UP(sc8830_timer_rate, HZ),
 		       base + SC8830_TIMER_LOAD(SC8830_EVENT_TIMER));
 	sc8830_timer_ctl(base, SC8830_EVENT_TIMER,
 			 SC8830_TIMER_CTL_ENABLE | SC8830_TIMER_CTL_PERIOD);
@@ -95,11 +119,10 @@ static int sc8830_timer_set_periodic(struct clock_event_device *evt)
 
 static int sc8830_timer_set_oneshot(struct clock_event_device *evt)
 {
-	struct timer_of *to = to_timer_of(evt);
-	void __iomem *base = timer_of_base(to);
+	void __iomem *base = sc8830_evt_base(evt);
 
 	/* Like the vendor driver, keep it running until the first event */
-	writel_relaxed(timer_of_period(to),
+	writel_relaxed(DIV_ROUND_UP(sc8830_timer_rate, HZ),
 		       base + SC8830_TIMER_LOAD(SC8830_EVENT_TIMER));
 	sc8830_timer_ctl(base, SC8830_EVENT_TIMER, SC8830_TIMER_CTL_ENABLE);
 	writel_relaxed(SC8830_TIMER_INT_EN,
@@ -110,7 +133,7 @@ static int sc8830_timer_set_oneshot(struct clock_event_device *evt)
 
 static int sc8830_timer_shutdown(struct clock_event_device *evt)
 {
-	void __iomem *base = timer_of_base(to_timer_of(evt));
+	void __iomem *base = sc8830_evt_base(evt);
 
 	/* Writing only the clear bit also masks the interrupt */
 	writel_relaxed(SC8830_TIMER_INT_CLR,
@@ -125,7 +148,7 @@ static int sc8830_timer_shutdown(struct clock_event_device *evt)
 static irqreturn_t sc8830_timer_interrupt(int irq, void *dev_id)
 {
 	struct clock_event_device *evt = dev_id;
-	void __iomem *base = timer_of_base(to_timer_of(evt));
+	void __iomem *base = sc8830_evt_base(evt);
 	u32 val;
 
 	val = readl_relaxed(base + SC8830_TIMER_INT(SC8830_EVENT_TIMER));
@@ -138,24 +161,42 @@ static irqreturn_t sc8830_timer_interrupt(int irq, void *dev_id)
 	return IRQ_HANDLED;
 }
 
-static struct timer_of sc8830_timer_of = {
-	.flags = TIMER_OF_IRQ | TIMER_OF_BASE | TIMER_OF_CLOCK,
+/* Runs on each CPU as it comes up: install its own block as tick device */
+static int sc8830_timer_starting_cpu(unsigned int cpu)
+{
+	struct sc8830_timer *t = &sc8830_timers[cpu];
 
-	.clkevt = {
-		.name = "sc8830-timer",
-		.rating = 300,
-		.features = CLOCK_EVT_FEAT_PERIODIC | CLOCK_EVT_FEAT_ONESHOT,
-		.set_next_event = sc8830_timer_set_next_event,
-		.set_state_periodic = sc8830_timer_set_periodic,
-		.set_state_oneshot = sc8830_timer_set_oneshot,
-		.set_state_shutdown = sc8830_timer_shutdown,
-	},
+	if (cpu >= SC8830_MAX_CPUS || !t->base)
+		return 0;
 
-	.of_irq = {
-		.handler = sc8830_timer_interrupt,
-		.flags = IRQF_TIMER | IRQF_IRQPOLL,
-	},
-};
+	t->evt.name = "sc8830-timer";
+	t->evt.rating = 300;
+	t->evt.features = CLOCK_EVT_FEAT_PERIODIC | CLOCK_EVT_FEAT_ONESHOT;
+	t->evt.set_next_event = sc8830_timer_set_next_event;
+	t->evt.set_state_periodic = sc8830_timer_set_periodic;
+	t->evt.set_state_oneshot = sc8830_timer_set_oneshot;
+	t->evt.set_state_shutdown = sc8830_timer_shutdown;
+	t->evt.cpumask = cpumask_of(cpu);
+	t->evt.irq = t->irq;
+
+	irq_force_affinity(t->irq, cpumask_of(cpu));
+	enable_irq(t->irq);
+	clockevents_config_and_register(&t->evt, sc8830_timer_rate, 2, 0xf0000000);
+
+	return 0;
+}
+
+static int sc8830_timer_dying_cpu(unsigned int cpu)
+{
+	struct sc8830_timer *t = &sc8830_timers[cpu];
+
+	if (cpu < SC8830_MAX_CPUS && t->base) {
+		t->evt.set_state_shutdown(&t->evt);
+		disable_irq_nosync(t->irq);
+	}
+
+	return 0;
+}
 
 /* The counters run down, so invert them for a monotonic up-count */
 static u64 notrace sc8830_timer_read_count(void)
@@ -186,51 +227,81 @@ static void __init sc8830_timer_enable_gates(struct device_node *np)
 
 	writel_relaxed(readl_relaxed(eb + SC8830_AON_APB_EB0) |
 		       SC8830_AON_APB_EB0_TMR, eb + SC8830_AON_APB_EB0);
+	writel_relaxed(readl_relaxed(eb + SC8830_AON_APB_EB1) |
+		       SC8830_AON_APB_EB1_TMR, eb + SC8830_AON_APB_EB1);
 	iounmap(eb);
 }
 
 static int __init sc8830_timer_init(struct device_node *np)
 {
-	struct timer_of *to = &sc8830_timer_of;
-	void __iomem *base;
-	unsigned long rate;
-	int n, ret;
+	struct clk *clk;
+	int cpu, n, ret;
 
 	sc8830_timer_enable_gates(np);
 
-	ret = timer_of_init(np, to);
-	if (ret)
-		return ret;
-
-	base = timer_of_base(to);
-	rate = timer_of_rate(to);
-
-	/* The bootloader may leave timers running; start from a clean state */
-	for (n = 0; n < SC8830_NUM_TIMERS; n++) {
-		sc8830_timer_ctl(base, n, 0);
-		writel_relaxed(SC8830_TIMER_INT_CLR, base + SC8830_TIMER_INT(n));
+	sc8830_timer_rate = 32768;
+	clk = of_clk_get(np, 0);
+	if (!IS_ERR(clk)) {
+		clk_prepare_enable(clk);
+		sc8830_timer_rate = clk_get_rate(clk);
 	}
 
-	writel_relaxed(0, base + SC8830_TIMER_INT(SC8830_SOURCE_TIMER));
-	sc8830_timer_ctl(base, SC8830_SOURCE_TIMER,
+	for (cpu = 0; cpu < SC8830_MAX_CPUS; cpu++) {
+		struct sc8830_timer *t = &sc8830_timers[cpu];
+
+		/* reg 0 is CPU0's block, reg 1 the gates, then CPUs 1-3 */
+		t->base = of_iomap(np, cpu ? cpu + 1 : 0);
+		if (!t->base) {
+			if (!cpu)
+				return -ENXIO;
+			break;
+		}
+
+		/* The bootloader may leave timers running; start clean */
+		for (n = 0; n < SC8830_NUM_TIMERS; n++) {
+			sc8830_timer_ctl(t->base, n, 0);
+			writel_relaxed(SC8830_TIMER_INT_CLR,
+				       t->base + SC8830_TIMER_INT(n));
+		}
+
+		t->irq = irq_of_parse_and_map(np, cpu);
+		if (!t->irq) {
+			pr_err("sc8830-timer: no interrupt for CPU%d\n", cpu);
+			iounmap(t->base);
+			t->base = NULL;
+			if (!cpu)
+				return -EINVAL;
+			break;
+		}
+
+		/* Enabled from the starting callback, on the right CPU */
+		irq_set_status_flags(t->irq, IRQ_NOAUTOEN);
+		ret = request_irq(t->irq, sc8830_timer_interrupt,
+				  IRQF_TIMER | IRQF_NOBALANCING,
+				  "sc8830-timer", &t->evt);
+		if (ret) {
+			pr_err("sc8830-timer: can't request irq for CPU%d\n", cpu);
+			return ret;
+		}
+	}
+
+	sc8830_source_base = sc8830_timers[0].base;
+	writel_relaxed(0, sc8830_source_base + SC8830_TIMER_INT(SC8830_SOURCE_TIMER));
+	sc8830_timer_ctl(sc8830_source_base, SC8830_SOURCE_TIMER,
 			 SC8830_TIMER_CTL_NEW | SC8830_TIMER_CTL_PERIOD);
-	writel_relaxed(U32_MAX, base + SC8830_TIMER_LOAD(SC8830_SOURCE_TIMER));
-	sc8830_timer_ctl(base, SC8830_SOURCE_TIMER, SC8830_TIMER_CTL_ENABLE |
-			 SC8830_TIMER_CTL_NEW | SC8830_TIMER_CTL_PERIOD);
+	writel_relaxed(U32_MAX,
+		       sc8830_source_base + SC8830_TIMER_LOAD(SC8830_SOURCE_TIMER));
+	sc8830_timer_ctl(sc8830_source_base, SC8830_SOURCE_TIMER,
+			 SC8830_TIMER_CTL_ENABLE | SC8830_TIMER_CTL_NEW |
+			 SC8830_TIMER_CTL_PERIOD);
 
-	sc8830_source_base = base;
-	sched_clock_register(sc8830_timer_read_count, 32, rate);
-	clocksource_register_hz(&sc8830_clocksource, rate);
+	sched_clock_register(sc8830_timer_read_count, 32, sc8830_timer_rate);
+	clocksource_register_hz(&sc8830_clocksource, sc8830_timer_rate);
 
-	/*
-	 * Register as the boot CPU's local tick device. With a wider cpumask
-	 * the per-CPU dummy_timer is preferred and this timer is demoted to
-	 * broadcast duty, which rules out oneshot mode and hrtimers.
-	 */
-	to->clkevt.cpumask = cpumask_of(0);
-	clockevents_config_and_register(&to->clkevt, rate, 2, 0xf0000000);
-
-	return 0;
+	return cpuhp_setup_state(CPUHP_AP_SPRD_SC8830_TIMER_STARTING,
+				 "clockevents/sc8830:starting",
+				 sc8830_timer_starting_cpu,
+				 sc8830_timer_dying_cpu);
 }
 
 TIMER_OF_DECLARE(sc8830, "sprd,sc8830-timer", sc8830_timer_init);

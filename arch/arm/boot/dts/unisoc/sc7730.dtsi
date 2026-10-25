@@ -91,12 +91,22 @@
 			interrupt-parent = <&gic>;
 		};
 
-		/* AON GPTIMER0; the second range holds the AON APB clock gates */
+		/*
+		 * One timer block per CPU: AON GPTIMER0 for CPU0 (also the
+		 * clocksource), then AP timers 0-2 for CPUs 1-3. The second
+		 * range holds the AON APB clock gates (EB0, EB1).
+		 */
 		timer@40050000 {
 			compatible = "sprd,sc8830-timer";
 			reg = <0x40050000 0x1000>,
-			      <0x402e0000 0x8>;
-			interrupts = <GIC_SPI 28 IRQ_TYPE_LEVEL_HIGH>;
+			      <0x402e0000 0x8>,
+			      <0x40220000 0x1000>,
+			      <0x40330000 0x1000>,
+			      <0x40340000 0x1000>;
+			interrupts = <GIC_SPI 28 IRQ_TYPE_LEVEL_HIGH>,
+				     <GIC_SPI 29 IRQ_TYPE_LEVEL_HIGH>,
+				     <GIC_SPI 119 IRQ_TYPE_LEVEL_HIGH>,
+				     <GIC_SPI 121 IRQ_TYPE_LEVEL_HIGH>;
 			clocks = <&clk32k>;
 		};
 
