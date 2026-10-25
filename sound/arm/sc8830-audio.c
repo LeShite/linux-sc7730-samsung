@@ -131,7 +131,11 @@
 #define  OVP_LDO_EN		BIT(11)
 #define  VB_EN			BIT(9)
 #define  VBO_EN			BIT(8)
+#define  LDOCG_EN		BIT(10)
 #define ANA_PMU1		0x0604
+#define  LDOCG_EN_FAL_ILD	BIT(3)
+#define  LDOCG_ISET_FAL		BIT(2)
+#define  LDOCG_RAMP_EN		BIT(1)
 #define  BG_EN			BIT(15)
 #define  BG_IBIAS_EN		BIT(14)
 #define  VCM_EN			BIT(13)
@@ -153,25 +157,65 @@
 #define  DACL_EN		BIT(15)
 #define  DACR_EN		BIT(14)
 #define  DACDC_RMV_EN		BIT(12)
+#define  HPL_EN			BIT(8)
+#define  HPR_EN			BIT(7)
+#define  DIFF_EN		BIT(6)
 #define  AOL_EN			BIT(4)
+#define ANA_CDC3		0x0628		/* class-G headphone amplifier */
+#define  CG_REF_EN		BIT(15)
+#define  CG_CHP_EN		BIT(14)
+#define  CG_HPL_EN		BIT(13)
+#define  CG_HPR_EN		BIT(12)
+#define  CG_CHP_OSC		GENMASK(9, 7)
+#define  CG_LPW			GENMASK(6, 5)
+#define  CG_HP_MODE		BIT(3)
+#define  CG_HPCAL_EN		BIT(2)
 #define ANA_CDC4		0x062c
 #define  PA_D_EN		BIT(15)
 #define  PA_DTRI_F		GENMASK(14, 13)
 #define ANA_CDC6		0x0634
 #define  DACL_AOL		BIT(13)
 #define  DACR_AOL		BIT(12)
+#define ANA_CDC7		0x0638
+#define  HPL_CGL		BIT(11)
+#define  HPR_CGR		BIT(10)
+#define  DACL_P_HPL		BIT(7)
+#define  DACR_P_HPR		BIT(2)
 #define ANA_CDC10		0x0644
 #define  DACL_G			GENMASK(15, 13)
 #define  DACR_G			GENMASK(12, 10)
 #define ANA_CDC11		0x0648
 #define  AOL_G			GENMASK(15, 12)
+#define ANA_CDC12		0x064c
+#define  HPL_G			GENMASK(11, 8)
+#define  HPR_G			GENMASK(7, 4)
+#define ANA_CDC13		0x0650		/* class-G gains, left */
+#define ANA_CDC14		0x0654		/* ... and right */
+#define  CG_G_1			GENMASK(15, 10)
+#define  CG_G_2			GENMASK(9, 7)
+#define ANA_CDC16		0x065c
+#define  HP_POP_CTL		GENMASK(7, 6)
+#define  HP_POP_STEP		GENMASK(5, 3)
+#define ANA_HDT0		0x0668		/* headset detection */
+#define  HEAD_INS_PD		BIT(10)
+#define  HEAD_SDET		GENMASK(6, 5)
+#define  HEADDETECT_PD		BIT(7)
+#define  HEAD_INS_VREF		GENMASK(9, 8)
+#define ANA_HDT1		0x066c
+#define  HEAD_L_INT_PU_PD	BIT(14)
+#define ANA_STS0		0x0674
+#define  HP_POP_FLG		GENMASK(8, 7)
+#define  HEAD_INSERT		BIT(10)
 #define DIG_CFG0		0x068c
 #define  AUDIFA_DACL_EN		BIT(9)
 #define  AUDIFA_DACR_EN		BIT(11)
 #define ANA_GLB_ARM_MODULE_EN	0x0800
 #define  ANA_AUD_EN		BIT(4)
+#define  ANA_HDT_EN		BIT(5)
 #define ANA_GLB_ARM_CLK_EN	0x0804
 #define  CLK_AUD_6P5M_EN	BIT(1)
+#define  CLK_AUD_HID_EN		BIT(4)
+#define  CLK_AUD_HBD_EN		BIT(3)
 #define  CLK_AUDIF_EN		BIT(0)
 #define ANA_GLB_RTC_CLK_EN	0x0808
 #define  RTC_AUD_EN		BIT(4)
@@ -240,6 +284,7 @@
 #define SPK_GAIN_MAX		8
 
 enum { MIX_LR, MIX_LEFT, MIX_RIGHT, MIX_DOWNMIX };
+enum { OUT_SPEAKER, OUT_HEADPHONE, OUT_BOTH, OUT_AUTO };
 
 struct sc8830_audio {
 	struct device *dev;
@@ -253,6 +298,11 @@ struct sc8830_audio {
 	u32 *nodes[2];			/* link lists, left and right */
 	dma_addr_t nodes_phys[2];
 	unsigned int irqs;
+
+	/* bring-up: level of the data that the DMA plays, from the DMA buffer itself */
+	struct delayed_work level;
+	unsigned int lv_n, lv_clip;
+	int lv_peak_l, lv_peak_r;
 
 
 	struct mutex lock;		/* power state and the controls */
@@ -268,6 +318,13 @@ struct sc8830_audio {
 	bool alc;			/* VBC limiter */
 	int vbc_dg;			/* VBC digital gain, 0 = off */
 	struct delayed_work power_off;
+	/* headphone (3.5 mm jack) */
+	int out;			/* OUT_*: where the sound goes */
+	int hp_gain;			/* ANA_CDC12 HPL_G/HPR_G, 0 .. 15 */
+	bool hp_up;			/* class-G amplifier is on */
+	bool hp_cg_link;		/* HPL_CGL/HPR_CGR switches of the vendor mixer */
+	bool jack_invert;		/* polarity of the insert flag, unconfirmed */
+	int jack_raw;			/* last ANA_STS0 HEAD_INSERT, -1 unknown */
 };
 
 /* DAALCCTL0-10 of the vendor's default DA profile (vbc_da_eq_profile_default) */
@@ -314,6 +371,17 @@ static void adi_upd(struct sc8830_audio *sa, u32 reg, u16 mask, u16 val)
 	spin_unlock_irqrestore(&sa->adi_lock, flags);
 }
 
+static u16 adi_get(struct sc8830_audio *sa, u32 reg)
+{
+	unsigned long flags;
+	u16 val = 0xdead;
+
+	spin_lock_irqsave(&sa->adi_lock, flags);
+	adi_read(sa, reg, &val);
+	spin_unlock_irqrestore(&sa->adi_lock, flags);
+	return val;
+}
+
 /* ---- codec power ------------------------------------------------------- */
 
 static void apply_route(struct sc8830_audio *sa)
@@ -341,9 +409,167 @@ static void set_gains(struct sc8830_audio *sa, int dac, int aol)
 	adi_upd(sa, ANA_CDC11, AOL_G, FIELD_PREP(AOL_G, aol));
 }
 
+static bool jack_inserted(struct sc8830_audio *sa)
+{
+	return sa->jack_raw >= 0 && (!!sa->jack_raw != sa->jack_invert);
+}
+
+static bool want_hp(struct sc8830_audio *sa)
+{
+	return sa->out == OUT_HEADPHONE || sa->out == OUT_BOTH ||
+	       (sa->out == OUT_AUTO && jack_inserted(sa));
+}
+
+static bool want_spk(struct sc8830_audio *sa)
+{
+	return sa->spk_on && (sa->out == OUT_SPEAKER || sa->out == OUT_BOTH ||
+			      (sa->out == OUT_AUTO && !jack_inserted(sa)));
+}
+
 static void apply_speaker_gain(struct sc8830_audio *sa)
 {
-	set_gains(sa, sa->spk_on ? sa->dac_gain : 0, min(15, sa->spk_gain + sa->boost));
+	bool spk = want_spk(sa);
+
+	/* the DACs also feed the headphones: they stay open while either output is on */
+	set_gains(sa, spk || sa->hp_up ? sa->dac_gain : 0,
+		  spk ? min(15, sa->spk_gain + sa->boost) : 0);
+}
+
+/*
+ * Headphone jack: the SC2723S has its own class-G amplifier (ANA_CDC3, CDC12-14, PMU0/1, HDT1).
+ * Same order as the vendor's DAPM: bias ramp (HP POP), class-G rail, HPL/HPR switches, DAC into
+ * the mixers, gains up one step at a time, then the amplifier outputs.
+ */
+static void hp_set_gain(struct sc8830_audio *sa, int g)
+{
+	adi_upd(sa, ANA_CDC12, HPL_G | HPR_G, FIELD_PREP(HPL_G, g) | FIELD_PREP(HPR_G, g));
+}
+
+static void hp_pop_wait(struct sc8830_audio *sa, const char *what)
+{
+	u16 sts = 0;
+	int i;
+
+	for (i = 0; i < 60; i++) {
+		sts = adi_get(sa, ANA_STS0);
+		if (FIELD_GET(HP_POP_FLG, sts) == 3)
+			break;
+		msleep(10);
+	}
+	dev_info(sa->dev, "HP pop %s: flag %lu after %d ms (STS0=%04x)\n", what,
+		 FIELD_GET(HP_POP_FLG, sts), i * 10, sts);
+}
+
+static void hp_on(struct sc8830_audio *sa)
+{
+	int g;
+
+	if (sa->hp_up)
+		return;
+	adi_upd(sa, ANA_CDC16, HP_POP_STEP | HP_POP_CTL,
+		FIELD_PREP(HP_POP_STEP, 4) | FIELD_PREP(HP_POP_CTL, 1));	/* ramp up */
+	hp_pop_wait(sa, "up");
+	adi_upd(sa, ANA_CDC16, HP_POP_CTL, FIELD_PREP(HP_POP_CTL, 3));	/* hold */
+
+	/* sprd_inter_headphone_pa(): class-G reference, rail, charge pump */
+	adi_upd(sa, ANA_CDC3, CG_LPW | CG_CHP_OSC, FIELD_PREP(CG_LPW, 0) | FIELD_PREP(CG_CHP_OSC, 1));
+	adi_upd(sa, ANA_CDC3, CG_REF_EN, CG_REF_EN);
+	adi_upd(sa, ANA_PMU0, LDOCG_EN, LDOCG_EN);
+	adi_upd(sa, ANA_CDC3, CG_CHP_EN, CG_CHP_EN);
+	adi_upd(sa, ANA_PMU1, LDOCG_EN_FAL_ILD | LDOCG_ISET_FAL | LDOCG_RAMP_EN,
+		LDOCG_EN_FAL_ILD | LDOCG_ISET_FAL | LDOCG_RAMP_EN);
+	adi_upd(sa, ANA_HDT1, HEAD_L_INT_PU_PD, HEAD_L_INT_PU_PD);
+	adi_upd(sa, ANA_CDC13, CG_G_1 | CG_G_2, FIELD_PREP(CG_G_1, 0x10) | FIELD_PREP(CG_G_2, 7));
+	adi_upd(sa, ANA_CDC14, CG_G_1 | CG_G_2, FIELD_PREP(CG_G_1, 0x10) | FIELD_PREP(CG_G_2, 7));
+	msleep(30);
+
+	/* HPL/HPR switches, differential mode, bias ramp off; then DAC L -> HPL and DAC R -> HPR */
+	hp_set_gain(sa, 0);
+	adi_upd(sa, ANA_CDC2, HPL_EN | HPR_EN | DIFF_EN, HPL_EN | HPR_EN | DIFF_EN);
+	adi_upd(sa, ANA_CDC16, HP_POP_CTL, 0);
+	adi_upd(sa, ANA_CDC7, DACL_P_HPL | DACR_P_HPR, DACL_P_HPL | DACR_P_HPR);
+	for (g = 1; g <= sa->hp_gain; g++) {
+		hp_set_gain(sa, g);
+		msleep(4);
+	}
+
+	/* sprd_inter_headphone_pa_post(): mode, calibration, outputs */
+	adi_upd(sa, ANA_CDC3, CG_HP_MODE, 0);
+	adi_upd(sa, ANA_CDC3, CG_HPCAL_EN, CG_HPCAL_EN);
+	msleep(10);
+	adi_upd(sa, ANA_CDC3, CG_HPL_EN | CG_HPR_EN, CG_HPL_EN | CG_HPR_EN);
+	msleep(20);
+	if (sa->hp_cg_link)
+		adi_upd(sa, ANA_CDC7, HPL_CGL | HPR_CGR, HPL_CGL | HPR_CGR);
+
+	sa->hp_up = true;
+	dev_info(sa->dev, "headphone amplifier on, gain %d\n", sa->hp_gain);
+}
+
+static void hp_off(struct sc8830_audio *sa)
+{
+	int g;
+
+	if (!sa->hp_up)
+		return;
+	for (g = sa->hp_gain - 1; g >= 0; g--) {
+		hp_set_gain(sa, g);
+		msleep(2);
+	}
+	adi_upd(sa, ANA_CDC7, HPL_CGL | HPR_CGR, 0);
+	adi_upd(sa, ANA_CDC3, CG_HPL_EN | CG_HPR_EN, 0);
+	adi_upd(sa, ANA_CDC3, CG_HPCAL_EN | CG_HP_MODE, 0);
+	adi_upd(sa, ANA_CDC16, HP_POP_STEP | HP_POP_CTL,
+		FIELD_PREP(HP_POP_STEP, 3) | FIELD_PREP(HP_POP_CTL, 2));	/* ramp down */
+	hp_pop_wait(sa, "down");
+	adi_upd(sa, ANA_CDC7, DACL_P_HPL | DACR_P_HPR, 0);
+	adi_upd(sa, ANA_CDC2, HPL_EN | HPR_EN | DIFF_EN, 0);
+	adi_upd(sa, ANA_CDC16, HP_POP_CTL, 0);
+	adi_upd(sa, ANA_CDC3, CG_CHP_EN | CG_REF_EN, 0);
+	adi_upd(sa, ANA_PMU0, LDOCG_EN, 0);
+	adi_upd(sa, ANA_PMU1, LDOCG_EN_FAL_ILD | LDOCG_ISET_FAL | LDOCG_RAMP_EN, 0);
+	adi_upd(sa, ANA_HDT1, HEAD_L_INT_PU_PD, 0);
+
+	sa->hp_up = false;
+	dev_info(sa->dev, "headphone amplifier off\n");
+}
+
+/* the insert flag of the headset detector (vendor: headset_sprd_sc2723.c, ANA_STS0 bit 10) */
+static void jack_enable(struct sc8830_audio *sa)
+{
+	adi_upd(sa, ANA_GLB_ARM_MODULE_EN, ANA_HDT_EN, ANA_HDT_EN);
+	adi_upd(sa, ANA_GLB_ARM_CLK_EN, CLK_AUD_HID_EN | CLK_AUD_HBD_EN,
+		CLK_AUD_HID_EN | CLK_AUD_HBD_EN);
+	adi_upd(sa, ANA_HDT0, HEAD_INS_PD | HEADDETECT_PD | HEAD_SDET | HEAD_INS_VREF,
+		FIELD_PREP(HEAD_SDET, 1) | FIELD_PREP(HEAD_INS_VREF, 3));
+}
+
+/* returns true if the flag changed */
+static bool jack_poll(struct sc8830_audio *sa)
+{
+	u16 sts = adi_get(sa, ANA_STS0);
+	int raw;
+
+	if (sts == 0xdead)
+		return false;
+	raw = !!(sts & HEAD_INSERT);
+	if (raw == sa->jack_raw)
+		return false;
+	dev_info(sa->dev, "jack: ANA_STS0=%04x insert flag %d -> %d\n", sts, sa->jack_raw, raw);
+	sa->jack_raw = raw;
+	return true;
+}
+
+/* put the amplifiers where the output setting says; the codec lock is held */
+static void apply_outputs(struct sc8830_audio *sa)
+{
+	if (!sa->powered)
+		return;
+	if (want_hp(sa))
+		hp_on(sa);
+	else
+		hp_off(sa);
+	apply_speaker_gain(sa);
 }
 
 static void codec_power_on(struct sc8830_audio *sa)
@@ -423,9 +649,12 @@ static void codec_power_on(struct sc8830_audio *sa)
 	 * its bias settle, open the DAC, then raise the amp gain a 3 dB step at a time.
 	 */
 	msleep(30);
+	jack_enable(sa);
+	msleep(10);
+	jack_poll(sa);
 	{
-		int dac = sa->spk_on ? sa->dac_gain : 0;
-		int aol = min(15, sa->spk_gain + sa->boost), g;
+		int dac = sa->dac_gain;
+		int aol = want_spk(sa) ? min(15, sa->spk_gain + sa->boost) : 0, g;
 
 		set_gains(sa, dac, 0);
 		for (g = 1; g <= aol; g++) {
@@ -435,11 +664,13 @@ static void codec_power_on(struct sc8830_audio *sa)
 	}
 
 	sa->powered = true;
-	dev_info(sa->dev, "codec on\n");
+	apply_outputs(sa);
+	dev_info(sa->dev, "codec on, output %d, jack flag %d\n", sa->out, sa->jack_raw);
 }
 
 static void codec_power_off(struct sc8830_audio *sa)
 {
+	hp_off(sa);
 	set_gains(sa, 0, 0);	/* the vendor drops the gains first, then the amp */
 	msleep(5);
 	adi_upd(sa, ANA_PMU0, PA_EN, 0);
@@ -458,6 +689,47 @@ static void codec_power_off(struct sc8830_audio *sa)
 
 	sa->powered = false;
 	dev_info(sa->dev, "codec off\n");
+}
+
+/*
+ * Every 250 ms scan the DMA ring (what dmix has mixed so far) for its peak and for samples at
+ * full scale, and every 2 s log the worst case of the window, if there was any sound. Tells if
+ * the data is already clipped on its way to the DAC or if the distortion comes later (analog).
+ */
+static void level_work(struct work_struct *work)
+{
+	struct sc8830_audio *sa = container_of(work, struct sc8830_audio, level.work);
+	struct snd_pcm_substream *ss = sa->substream;
+	const s16 *buf;
+	unsigned int i, frames;
+
+	mutex_lock(&sa->lock);
+	if (jack_poll(sa) && sa->out == OUT_AUTO)
+		apply_outputs(sa);
+	mutex_unlock(&sa->lock);
+
+	if (!ss || !ss->runtime || !ss->runtime->dma_area)
+		return;
+	buf = (const s16 *)ss->runtime->dma_area;
+	frames = ss->runtime->dma_bytes / 4;
+	for (i = 0; i < frames; i++) {
+		int l = abs(buf[2 * i]), r = abs(buf[2 * i + 1]);
+
+		if (l > sa->lv_peak_l)
+			sa->lv_peak_l = l;
+		if (r > sa->lv_peak_r)
+			sa->lv_peak_r = r;
+		if (l >= 32000)
+			sa->lv_clip++;
+	}
+	if (++sa->lv_n % 8 == 0) {
+		if (sa->lv_peak_l || sa->lv_peak_r)
+			dev_info(sa->dev, "level: peak L=%d (%d%% of full scale) R=%d, left samples >= 32000: %u\n",
+				 sa->lv_peak_l, sa->lv_peak_l * 100 / 32768, sa->lv_peak_r, sa->lv_clip);
+		sa->lv_peak_l = sa->lv_peak_r = 0;
+		sa->lv_clip = 0;
+	}
+	schedule_delayed_work(&sa->level, msecs_to_jiffies(250));
 }
 
 static void power_off_work(struct work_struct *work)
@@ -633,17 +905,6 @@ static int sc8830_pcm_hw_params(struct snd_pcm_substream *substream,
 	return 0;
 }
 
-static u16 adi_get(struct sc8830_audio *sa, u32 reg)
-{
-	unsigned long flags;
-	u16 val = 0xdead;
-
-	spin_lock_irqsave(&sa->adi_lock, flags);
-	adi_read(sa, reg, &val);
-	spin_unlock_irqrestore(&sa->adi_lock, flags);
-	return val;
-}
-
 /* bring-up aid: what the hardware holds when a stream starts */
 static void dump_regs(struct sc8830_audio *sa, struct snd_pcm_runtime *runtime)
 {
@@ -711,8 +972,13 @@ static int sc8830_pcm_trigger(struct snd_pcm_substream *substream, int cmd)
 		upd(sa->vbc, VBCHNEN, VBDA0_EN | VBDA1_EN, VBDA0_EN | VBDA1_EN);
 		upd(sa->vbc, VBDABUFFDTA, VBENABLE | VBDA0DMA_EN | VBDA1DMA_EN,
 		    VBENABLE | VBDA0DMA_EN | VBDA1DMA_EN);
+		sa->lv_n = 0;
+		sa->lv_peak_l = sa->lv_peak_r = 0;
+		sa->lv_clip = 0;
+		schedule_delayed_work(&sa->level, msecs_to_jiffies(250));
 		return 0;
 	case SNDRV_PCM_TRIGGER_STOP:
+		cancel_delayed_work(&sa->level);
 		{
 			struct snd_pcm_runtime *rt = substream->runtime;
 
@@ -1049,6 +1315,117 @@ static int vbc_dg_put(struct snd_kcontrol *kc, struct snd_ctl_elem_value *uc)
 	return changed;
 }
 
+/* headphone jack controls */
+static int out_info(struct snd_kcontrol *kc, struct snd_ctl_elem_info *uinfo)
+{
+	static const char * const names[] = { "Speaker", "Headphone", "Both", "Auto" };
+
+	return snd_ctl_enum_info(uinfo, 1, ARRAY_SIZE(names), names);
+}
+
+static int out_get(struct snd_kcontrol *kc, struct snd_ctl_elem_value *uc)
+{
+	uc->value.enumerated.item[0] = ((struct sc8830_audio *)snd_kcontrol_chip(kc))->out;
+	return 0;
+}
+
+static int out_put(struct snd_kcontrol *kc, struct snd_ctl_elem_value *uc)
+{
+	struct sc8830_audio *sa = snd_kcontrol_chip(kc);
+	unsigned int v = uc->value.enumerated.item[0];
+	int changed;
+
+	if (v > OUT_AUTO)
+		return -EINVAL;
+	mutex_lock(&sa->lock);
+	changed = sa->out != v;
+	sa->out = v;
+	if (changed)
+		apply_outputs(sa);
+	mutex_unlock(&sa->lock);
+	return changed;
+}
+
+static int hp_vol_info(struct snd_kcontrol *kc, struct snd_ctl_elem_info *uinfo)
+{
+	uinfo->type = SNDRV_CTL_ELEM_TYPE_INTEGER;
+	uinfo->count = 1;
+	uinfo->value.integer.min = 0;
+	uinfo->value.integer.max = 15;
+	return 0;
+}
+
+static int hp_vol_get(struct snd_kcontrol *kc, struct snd_ctl_elem_value *uc)
+{
+	uc->value.integer.value[0] = ((struct sc8830_audio *)snd_kcontrol_chip(kc))->hp_gain;
+	return 0;
+}
+
+static int hp_vol_put(struct snd_kcontrol *kc, struct snd_ctl_elem_value *uc)
+{
+	struct sc8830_audio *sa = snd_kcontrol_chip(kc);
+	long v = uc->value.integer.value[0];
+	int changed;
+
+	if (v < 0 || v > 15)
+		return -EINVAL;
+	mutex_lock(&sa->lock);
+	changed = sa->hp_gain != v;
+	sa->hp_gain = v;
+	if (changed && sa->hp_up)
+		hp_set_gain(sa, v);
+	mutex_unlock(&sa->lock);
+	return changed;
+}
+
+static int hp_cg_get(struct snd_kcontrol *kc, struct snd_ctl_elem_value *uc)
+{
+	uc->value.integer.value[0] = ((struct sc8830_audio *)snd_kcontrol_chip(kc))->hp_cg_link;
+	return 0;
+}
+
+static int hp_cg_put(struct snd_kcontrol *kc, struct snd_ctl_elem_value *uc)
+{
+	struct sc8830_audio *sa = snd_kcontrol_chip(kc);
+	bool on = !!uc->value.integer.value[0];
+	int changed;
+
+	mutex_lock(&sa->lock);
+	changed = sa->hp_cg_link != on;
+	sa->hp_cg_link = on;
+	if (changed && sa->hp_up)
+		adi_upd(sa, ANA_CDC7, HPL_CGL | HPR_CGR, on ? HPL_CGL | HPR_CGR : 0);
+	mutex_unlock(&sa->lock);
+	return changed;
+}
+
+static int jack_inv_get(struct snd_kcontrol *kc, struct snd_ctl_elem_value *uc)
+{
+	uc->value.integer.value[0] = ((struct sc8830_audio *)snd_kcontrol_chip(kc))->jack_invert;
+	return 0;
+}
+
+static int jack_inv_put(struct snd_kcontrol *kc, struct snd_ctl_elem_value *uc)
+{
+	struct sc8830_audio *sa = snd_kcontrol_chip(kc);
+	bool on = !!uc->value.integer.value[0];
+	int changed;
+
+	mutex_lock(&sa->lock);
+	changed = sa->jack_invert != on;
+	sa->jack_invert = on;
+	if (changed)
+		apply_outputs(sa);
+	mutex_unlock(&sa->lock);
+	return changed;
+}
+
+static int jack_get(struct snd_kcontrol *kc, struct snd_ctl_elem_value *uc)
+{
+	uc->value.integer.value[0] = ((struct sc8830_audio *)snd_kcontrol_chip(kc))->jack_raw > 0;
+	return 0;
+}
+
 static const DECLARE_TLV_DB_SCALE(spk_tlv, -2400, 300, 0);
 
 static const struct snd_kcontrol_new sc8830_controls[] = {
@@ -1118,6 +1495,41 @@ static const struct snd_kcontrol_new sc8830_controls[] = {
 		.get = spk_sw_get,
 		.put = spk_sw_put,
 	},
+	{
+		.iface = SNDRV_CTL_ELEM_IFACE_MIXER,
+		.name = "Output Select",
+		.info = out_info,
+		.get = out_get,
+		.put = out_put,
+	},
+	{
+		.iface = SNDRV_CTL_ELEM_IFACE_MIXER,
+		.name = "Headphone Playback Volume",
+		.info = hp_vol_info,
+		.get = hp_vol_get,
+		.put = hp_vol_put,
+	},
+	{
+		.iface = SNDRV_CTL_ELEM_IFACE_MIXER,
+		.name = "Headphone CG Link",
+		.info = snd_ctl_boolean_mono_info,
+		.get = hp_cg_get,
+		.put = hp_cg_put,
+	},
+	{
+		.iface = SNDRV_CTL_ELEM_IFACE_MIXER,
+		.name = "Jack Invert",
+		.info = snd_ctl_boolean_mono_info,
+		.get = jack_inv_get,
+		.put = jack_inv_put,
+	},
+	{
+		.iface = SNDRV_CTL_ELEM_IFACE_MIXER,
+		.name = "Headphone Jack",
+		.access = SNDRV_CTL_ELEM_ACCESS_READ,
+		.info = snd_ctl_boolean_mono_info,
+		.get = jack_get,
+	},
 };
 
 /* ---- probe -------------------------------------------------------------- */
@@ -1156,6 +1568,7 @@ static int sc8830_audio_probe(struct platform_device *pdev)
 	spin_lock_init(&sa->adi_lock);
 	mutex_init(&sa->lock);
 	INIT_DELAYED_WORK(&sa->power_off, power_off_work);
+	INIT_DELAYED_WORK(&sa->level, level_work);
 	sa->spk_gain = SPK_GAIN_DEFAULT;
 	sa->fifo = VBC_FIFO_FRAMES;
 	sa->spk_on = true;
@@ -1171,6 +1584,10 @@ static int sc8830_audio_probe(struct platform_device *pdev)
 	sa->boost = 0;
 	sa->mix = MIX_LEFT;
 	sa->write_mode = false;
+	/* both outputs until the insert flag's polarity is confirmed on the hardware */
+	sa->out = OUT_BOTH;
+	sa->hp_gain = 6;	/* the vendor's Headset volume levels run from 4 to 11 */
+	sa->jack_raw = -1;
 
 	sa->vbc = map(pdev, "vbc", NULL);
 	sa->codec = map(pdev, "codec", NULL);
