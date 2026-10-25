@@ -384,6 +384,8 @@ static u16 adi_get(struct sc8830_audio *sa, u32 reg)
 
 /* ---- codec power ------------------------------------------------------- */
 
+static bool want_spk(struct sc8830_audio *sa);
+
 static void apply_route(struct sc8830_audio *sa)
 {
 	u16 on = (sa->mix != MIX_RIGHT ? DACL_AOL : 0) |
@@ -391,6 +393,8 @@ static void apply_route(struct sc8830_audio *sa)
 
 	if (sa->mix == MIX_DOWNMIX)
 		on = DACL_AOL;
+	if (!want_spk(sa))	/* the amp at its lowest gain (AOL_G 0) is still audible */
+		on = 0;
 
 	adi_upd(sa, ANA_CDC6, DACL_AOL | DACR_AOL, on);
 }
@@ -569,6 +573,7 @@ static void apply_outputs(struct sc8830_audio *sa)
 		hp_on(sa);
 	else
 		hp_off(sa);
+	apply_route(sa);
 	apply_speaker_gain(sa);
 }
 
@@ -1100,8 +1105,10 @@ static int spk_sw_put(struct snd_kcontrol *kc, struct snd_ctl_elem_value *uc)
 	mutex_lock(&sa->lock);
 	changed = sa->spk_on != on;
 	sa->spk_on = on;
-	if (changed && sa->powered)
+	if (changed && sa->powered) {
+		apply_route(sa);
 		apply_speaker_gain(sa);
+	}
 	mutex_unlock(&sa->lock);
 	return changed;
 }
@@ -1315,7 +1322,11 @@ static int vbc_dg_put(struct snd_kcontrol *kc, struct snd_ctl_elem_value *uc)
 	return changed;
 }
 
-/* headphone jack controls */
+/*
+ * Headphone jack controls. Not named "Output Select", "Headphone ..." or "Headphone Jack": PipeWire's
+ * alsa-card-profile drives controls with those names (its speaker path sets the headphone volume to
+ * its minimum) and left the jack silent.
+ */
 static int out_info(struct snd_kcontrol *kc, struct snd_ctl_elem_info *uinfo)
 {
 	static const char * const names[] = { "Speaker", "Headphone", "Both", "Auto" };
@@ -1497,35 +1508,35 @@ static const struct snd_kcontrol_new sc8830_controls[] = {
 	},
 	{
 		.iface = SNDRV_CTL_ELEM_IFACE_MIXER,
-		.name = "Output Select",
+		.name = "Aux Output",
 		.info = out_info,
 		.get = out_get,
 		.put = out_put,
 	},
 	{
 		.iface = SNDRV_CTL_ELEM_IFACE_MIXER,
-		.name = "Headphone Playback Volume",
+		.name = "Aux Gain",
 		.info = hp_vol_info,
 		.get = hp_vol_get,
 		.put = hp_vol_put,
 	},
 	{
 		.iface = SNDRV_CTL_ELEM_IFACE_MIXER,
-		.name = "Headphone CG Link",
+		.name = "Aux CG Link",
 		.info = snd_ctl_boolean_mono_info,
 		.get = hp_cg_get,
 		.put = hp_cg_put,
 	},
 	{
 		.iface = SNDRV_CTL_ELEM_IFACE_MIXER,
-		.name = "Jack Invert",
+		.name = "Aux Jack Invert",
 		.info = snd_ctl_boolean_mono_info,
 		.get = jack_inv_get,
 		.put = jack_inv_put,
 	},
 	{
 		.iface = SNDRV_CTL_ELEM_IFACE_MIXER,
-		.name = "Headphone Jack",
+		.name = "Aux Jack Flag",
 		.access = SNDRV_CTL_ELEM_ACCESS_READ,
 		.info = snd_ctl_boolean_mono_info,
 		.get = jack_get,
