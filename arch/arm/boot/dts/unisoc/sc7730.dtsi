@@ -188,6 +188,15 @@
 			status = "disabled";
 		};
 
+		/* SDIO of the Marlin SC2331 WiFi/BT chip (vendor "sdio1", "sdio_wifi") */
+		sdio1: mmc@20400000 {
+			compatible = "sprd,sc8830-sdhci";
+			reg = <0x20400000 0x1000>;
+			interrupts = <GIC_SPI 58 IRQ_TYPE_LEVEL_HIGH>;
+			sprd,delays = <0x3 0x3 0x3>;
+			status = "disabled";
+		};
+
 		/* eMMC (vendor "sdio3"), set up by the bootloader */
 		emmc: mmc@20600000 {
 			compatible = "sprd,sc8830-sdhci";

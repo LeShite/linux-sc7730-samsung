@@ -12,9 +12,15 @@
  *  - the power control register is unused: the bootloader powers the
  *    card, so it is left alone;
  *  - only SDMA was ever used (ADMA hits a BUG_ON in the vendor driver).
+ *
+ * The eMMC and SD hosts run from 384 MHz, set up by the bootloader. The SDIO host of the WiFi chip
+ * (vendor "sdio1") runs from 96 MHz and nobody turns its clocks on, so a node may give
+ *	sprd,base-clock = <Hz>;
+ *	sprd,init-regs = <phys mask value>, ...;	(read-modify-write before the host is touched)
  */
 
 #include <linux/delay.h>
+#include <linux/io.h>
 #include <linux/iopoll.h>
 #include <linux/module.h>
 #include <linux/of.h>
@@ -37,6 +43,7 @@
 
 struct sc8830_sdhci {
 	u32 delays[3];
+	u32 base_clk;
 };
 
 static void sc8830_sdhci_reset(struct sdhci_host *host, u8 mask)
@@ -61,6 +68,7 @@ static void sc8830_sdhci_reset(struct sdhci_host *host, u8 mask)
 
 static void sc8830_sdhci_set_clock(struct sdhci_host *host, unsigned int clock)
 {
+	struct sc8830_sdhci *priv = sdhci_pltfm_priv(sdhci_priv(host));
 	u32 div;
 
 	host->mmc->actual_clock = 0;
@@ -69,22 +77,45 @@ static void sc8830_sdhci_set_clock(struct sdhci_host *host, unsigned int clock)
 		return;
 
 	/* smallest divider that does not overclock the card */
-	div = DIV_ROUND_UP(SC8830_SDHCI_BASE_CLK, 2 * clock);
+	div = DIV_ROUND_UP(priv->base_clk, 2 * clock);
 	div = div ? div - 1 : 0;
 	div = min_t(u32, div, SC8830_SDHCI_MAX_DIV);
 
-	host->mmc->actual_clock = SC8830_SDHCI_BASE_CLK / (2 * (div + 1));
+	host->mmc->actual_clock = priv->base_clk / (2 * (div + 1));
 	sdhci_enable_clk(host, ((div & 0x300) >> 2) | ((div & 0xff) << 8));
 }
 
 static unsigned int sc8830_sdhci_get_max_clock(struct sdhci_host *host)
 {
-	return SC8830_SDHCI_BASE_CLK;
+	return ((struct sc8830_sdhci *)sdhci_pltfm_priv(sdhci_priv(host)))->base_clk;
 }
 
 static unsigned int sc8830_sdhci_get_min_clock(struct sdhci_host *host)
 {
-	return SC8830_SDHCI_BASE_CLK / (2 * (SC8830_SDHCI_MAX_DIV + 1));
+	return sc8830_sdhci_get_max_clock(host) / (2 * (SC8830_SDHCI_MAX_DIV + 1));
+}
+
+/* clocks and gates the bootloader left off: "sprd,init-regs" triples */
+static int sc8830_sdhci_init_regs(struct device *dev)
+{
+	int n = of_property_count_u32_elems(dev->of_node, "sprd,init-regs"), i;
+	u32 t[3];
+
+	for (i = 0; n > 0 && i + 3 <= n; i += 3) {
+		void __iomem *r;
+
+		if (of_property_read_u32_index(dev->of_node, "sprd,init-regs", i, &t[0]) ||
+		    of_property_read_u32_index(dev->of_node, "sprd,init-regs", i + 1, &t[1]) ||
+		    of_property_read_u32_index(dev->of_node, "sprd,init-regs", i + 2, &t[2]))
+			return -EINVAL;
+		r = ioremap(t[0], 4);
+		if (!r)
+			return -ENOMEM;
+		writel((readl(r) & ~t[1]) | (t[2] & t[1]), r);
+		dev_info(dev, "init reg %08x = %08x\n", t[0], readl(r));
+		iounmap(r);
+	}
+	return 0;
 }
 
 /* The bootloader powers the card; the power control register is unused */
@@ -120,6 +151,10 @@ static int sc8830_sdhci_probe(struct platform_device *pdev)
 	struct sdhci_host *host;
 	int ret;
 
+	ret = sc8830_sdhci_init_regs(&pdev->dev);
+	if (ret)
+		return ret;
+
 	host = sdhci_pltfm_init(pdev, &sc8830_sdhci_pdata, sizeof(*priv));
 	if (IS_ERR(host))
 		return PTR_ERR(host);
@@ -128,6 +163,8 @@ static int sc8830_sdhci_probe(struct platform_device *pdev)
 	priv = sdhci_pltfm_priv(pltfm_host);
 	of_property_read_u32_array(pdev->dev.of_node, "sprd,delays",
 				   priv->delays, ARRAY_SIZE(priv->delays));
+	priv->base_clk = SC8830_SDHCI_BASE_CLK;
+	of_property_read_u32(pdev->dev.of_node, "sprd,base-clock", &priv->base_clk);
 
 	/* What the bootloader left behind, before the first reset */
 	dev_info(&pdev->dev,

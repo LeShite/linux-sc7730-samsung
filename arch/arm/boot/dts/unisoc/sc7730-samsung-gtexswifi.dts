@@ -5,6 +5,7 @@
 
 /dts-v1/;
 
+#include <dt-bindings/gpio/gpio.h>
 #include "sc7730.dtsi"
 
 / {
@@ -96,6 +97,35 @@
 	status = "okay";
 };
 
+/*
+ * Marlin SC2331 WiFi/BT (vendor node "sprd-marlin"): 1.6 V DC-DC vddcon, 3.3 V vddwifipa, 32 kHz on
+ * CLK_AUX0, reset on GPIO 230 (pulsed by the vendor's sprd_download_rst()), SDIO1 at 96 MHz.
+ */
+/ {
+	marlin_pwrseq: marlin-pwrseq {
+		compatible = "mmc-pwrseq-simple";
+		reset-gpios = <&gpio 230 GPIO_ACTIVE_LOW>;
+		post-power-on-delay-ms = <20>;
+	};
+};
+
+&sdio1 {
+	bus-width = <4>;
+	non-removable;
+	keep-power-in-suspend;
+	cap-sd-highspeed;
+	no-mmc;
+	no-sd;
+	max-frequency = <24000000>;
+	mmc-pwrseq = <&marlin_pwrseq>;
+	sprd,base-clock = <96000000>;
+	sprd,init-regs = <0x402e3020 0x000f0007 0x00000000>,	/* CLK_AUX0: 32 kHz, no divider */
+			 <0x402e0004 0x00000004 0x00000004>,	/* AON APB_EB1: AUX0 on */
+			 <0x7120004c 0x00000003 0x00000002>,	/* SDIO1 clock: 96 MHz */
+			 <0x20d00000 0x00000200 0x00000200>;	/* AP AHB EB: SDIO1 on */
+	status = "okay";
+};
+
 &pmic {
 	/* touchscreen supply; the vendor touch driver runs it at 3.0 V */
 	vddsim2: vddsim2 {
@@ -104,6 +134,26 @@
 		regulator-name = "vddsim2";
 		regulator-min-microvolt = <3000000>;
 		regulator-max-microvolt = <3000000>;
+	};
+
+	/* Marlin: download/core DC-DC, its voltage as the bootloader left it (the vendor asks 1.6 V) */
+	vddcon: vddcon {
+		sprd,pd = <0x814 0x2000>;
+		sprd,trim = <0xa18 0x3ff>;
+		sprd,voltage = <600000 3125>;
+		regulator-name = "vddcon";
+		regulator-always-on;
+	};
+
+	/*
+	 * Marlin: "vdd-pa", 3.3 V per the vendor DTS comment, 1.8 V per its regulator default; nobody
+	 * in the vendor kernel sets it, so leave the voltage alone and only switch it on
+	 */
+	vddwifipa: vddwifipa {
+		sprd,pd = <0x814 0x800>;
+		sprd,trim = <0x818 0xff>;
+		regulator-name = "vddwifipa";
+		regulator-always-on;
 	};
 };
 

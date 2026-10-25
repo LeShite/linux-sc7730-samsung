@@ -14,7 +14,9 @@
  * 1.2 V + n * 10 mV. Each regulator is described in DT:
  *	sprd,pd = <offset bit>;
  *	sprd,trim = <offset mask>;
- * with offsets relative to the PMIC window.
+ * with offsets relative to the PMIC window. A DC-DC with another trim scale (vddcon: 0.6 V +
+ * n * 3.125 mV) adds
+ *	sprd,voltage = <min_uV step_uV>;
  */
 
 #include <linux/bitfield.h>
@@ -195,7 +197,7 @@ static int sc2723_register_ldo(struct sc2723 *pmic, struct device_node *np)
 	struct regulator_config cfg = { };
 	struct regulator_dev *rdev;
 	struct sc2723_ldo *ldo;
-	u32 pd[2], trim[2];
+	u32 pd[2], trim[2], volt[2] = { SC2723_LDO_MIN_UV, SC2723_LDO_STEP_UV };
 	int ret;
 
 	if (of_property_read_u32_array(np, "sprd,pd", pd, 2) ||
@@ -203,6 +205,8 @@ static int sc2723_register_ldo(struct sc2723 *pmic, struct device_node *np)
 		dev_err(pmic->dev, "%pOF: sprd,pd and sprd,trim are required\n", np);
 		return -EINVAL;
 	}
+
+	of_property_read_u32_array(np, "sprd,voltage", volt, 2);
 
 	ldo = devm_kzalloc(pmic->dev, sizeof(*ldo), GFP_KERNEL);
 	if (!ldo)
@@ -219,8 +223,8 @@ static int sc2723_register_ldo(struct sc2723 *pmic, struct device_node *np)
 	ldo->desc.type = REGULATOR_VOLTAGE;
 	ldo->desc.owner = THIS_MODULE;
 	ldo->desc.ops = &sc2723_ldo_ops;
-	ldo->desc.min_uV = SC2723_LDO_MIN_UV;
-	ldo->desc.uV_step = SC2723_LDO_STEP_UV;
+	ldo->desc.min_uV = volt[0];
+	ldo->desc.uV_step = volt[1];
 	ldo->desc.n_voltages = (trim[1] >> __ffs(trim[1])) + 1;
 	ldo->desc.enable_time = 1000;
 
