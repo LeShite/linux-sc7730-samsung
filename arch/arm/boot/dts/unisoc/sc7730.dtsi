@@ -153,6 +153,12 @@
 			reg-names = "adi", "pmic";
 		};
 
+		/* Panel brightness: DCS commands through the DSI host (DesignWare 1.21a) */
+		backlight@21800000 {
+			compatible = "sprd,sc8830-dsi-backlight";
+			reg = <0x21800000 0x1000>;
+		};
+
 		/* Buttons: power and volume down on the PMIC's EIC, volume up and home on the keypad */
 		keys@40250000 {
 			compatible = "sprd,sc8830-keys";
