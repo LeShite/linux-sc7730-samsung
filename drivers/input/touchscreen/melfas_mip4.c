@@ -17,6 +17,7 @@
 #include <linux/interrupt.h>
 #include <linux/module.h>
 #include <linux/of.h>
+#include <linux/regulator/consumer.h>
 #include <linux/slab.h>
 #include <linux/unaligned.h>
 
@@ -1450,6 +1451,13 @@ static int mip4_probe(struct i2c_client *client)
 					      "ce", GPIOD_OUT_LOW);
 	if (IS_ERR(ts->gpio_ce))
 		return dev_err_probe(&client->dev, PTR_ERR(ts->gpio_ce), "Failed to get gpio\n");
+
+	/* Boards without a CE line may power the controller from a supply */
+	error = devm_regulator_get_enable_optional(&client->dev, "vdd");
+	if (error && error != -ENODEV)
+		return dev_err_probe(&client->dev, error, "Failed to enable vdd\n");
+	if (!error)
+		usleep_range(200 * 1000, 300 * 1000);	/* booting delay */
 
 	error = mip4_power_on(ts);
 	if (error)

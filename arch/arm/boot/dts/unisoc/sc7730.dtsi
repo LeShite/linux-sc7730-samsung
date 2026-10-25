@@ -122,6 +122,37 @@
 			reg = <0x402b0000 0x1000>;
 		};
 
+		/* 256 digital GPIOs, same layout as the SC9860 */
+		gpio: gpio@40280000 {
+			compatible = "sprd,sc9860-gpio";
+			reg = <0x40280000 0x1000>;
+			interrupts = <GIC_SPI 35 IRQ_TYPE_LEVEL_HIGH>;
+			gpio-controller;
+			#gpio-cells = <2>;
+			interrupt-controller;
+			#interrupt-cells = <2>;
+		};
+
+		/* the older Spreadtrum I2C block; "eb" is the AP APB clock gate */
+		i2c1: i2c@70600000 {
+			compatible = "sprd,sc8830-i2c";
+			reg = <0x70600000 0x1000>, <0x71300000 0x4>;
+			reg-names = "i2c", "eb";
+			sprd,gate-bit = <9>;
+			interrupts = <GIC_SPI 12 IRQ_TYPE_LEVEL_HIGH>;
+			clock-frequency = <100000>;
+			#address-cells = <1>;
+			#size-cells = <0>;
+			status = "disabled";
+		};
+
+		/* SC2723 PMIC: ADI controller and the PMIC register window */
+		pmic: pmic@40030000 {
+			compatible = "sprd,sc2723-regulator";
+			reg = <0x40030000 0x1000>, <0x40038000 0x1000>;
+			reg-names = "adi", "pmic";
+		};
+
 		/* SD card slot (vendor "sdio0") */
 		sdc: mmc@20300000 {
 			compatible = "sprd,sc8830-sdhci";

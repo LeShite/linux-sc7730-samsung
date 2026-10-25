@@ -95,3 +95,26 @@
 	max-frequency = <52000000>;
 	status = "okay";
 };
+
+&pmic {
+	/* touchscreen supply; the vendor touch driver runs it at 3.0 V */
+	vddsim2: vddsim2 {
+		sprd,pd = <0x814 0x8>;
+		sprd,trim = <0x82c 0xff00>;
+		regulator-name = "vddsim2";
+		regulator-min-microvolt = <3000000>;
+		regulator-max-microvolt = <3000000>;
+	};
+};
+
+&i2c1 {
+	sprd,pull-up;
+	status = "okay";
+
+	touchscreen@48 {
+		compatible = "melfas,mip4_ts";
+		reg = <0x48>;
+		interrupts-extended = <&gpio 238 IRQ_TYPE_EDGE_FALLING>;
+		vdd-supply = <&vddsim2>;
+	};
+};

@@ -1151,6 +1151,13 @@ config I2C_SIMTEC
 	  This driver can also be built as a module. If so, the module
 	  will be called i2c-simtec.
 
+config I2C_SPRD_SC8830
+	tristate "Spreadtrum SC8830 family I2C controller"
+	depends on ARCH_SPRD || COMPILE_TEST
+	help
+	  The older I2C controller of 32-bit Spreadtrum SC8830 family SoCs
+	  such as the SC7730.
+
 config I2C_SPRD
 	tristate "Spreadtrum I2C interface"
 	depends on I2C=y && (ARCH_SPRD || COMPILE_TEST)
