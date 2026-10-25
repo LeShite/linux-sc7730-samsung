@@ -707,6 +707,16 @@ static int sc8830_pcm_trigger(struct snd_pcm_substream *substream, int cmd)
 		    VBENABLE | VBDA0DMA_EN | VBDA1DMA_EN);
 		return 0;
 	case SNDRV_PCM_TRIGGER_STOP:
+		{
+			struct snd_pcm_runtime *rt = substream->runtime;
+
+			/* an xrun stops the stream from here: tell the two pointers apart from a normal stop */
+			if (rt->status->state == SNDRV_PCM_STATE_RUNNING)
+				dev_info_ratelimited(sa->dev, "stop while running (xrun?): hw=%lu appl=%lu buffer=%lu period=%lu\n",
+						     (unsigned long)rt->status->hw_ptr,
+						     (unsigned long)rt->control->appl_ptr,
+						     rt->buffer_size, rt->period_size);
+		}
 		upd(sa->vbc, VBDABUFFDTA, VBENABLE | VBDA0DMA_EN | VBDA1DMA_EN, 0);
 		upd(sa->vbc, VBCHNEN, VBDA0_EN | VBDA1_EN, 0);
 		dma_stop_channel(sa, 0);
