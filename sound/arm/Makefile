@@ -12,3 +12,6 @@ snd-pxa2xx-lib-$(CONFIG_SND_PXA2XX_LIB_AC97)	+= pxa2xx-ac97-lib.o
 
 obj-$(CONFIG_SND_PXA2XX_AC97)	+= snd-pxa2xx-ac97.o
 snd-pxa2xx-ac97-y		:= pxa2xx-ac97.o
+
+obj-$(CONFIG_SND_SC8830)	+= snd-sc8830-audio.o
+snd-sc8830-audio-y		:= sc8830-audio.o

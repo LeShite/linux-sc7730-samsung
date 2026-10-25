@@ -18,6 +18,15 @@ config SND_ARMAACI
 	select SND_PCM
 	select SND_AC97_CODEC
 
+config SND_SC8830
+	tristate "Spreadtrum SC8830 (SC7730) VBC and SC2723S codec"
+	depends on ARCH_SPRD || COMPILE_TEST
+	depends on HAS_DMA
+	select SND_PCM
+	help
+	  Speaker playback through the VBC, the AP DMA and the codec inside
+	  the SC2723S PMIC, as on the Samsung Galaxy Tab A 7.0 (SM-T280).
+
 config SND_PXA2XX_AC97
 	tristate "AC97 driver for the Intel PXA2xx chip"
 	depends on ARCH_PXA
