@@ -644,6 +644,15 @@ config MCHP_LAN966X_PCI
 	    - lan966x-miim (MDIO_MSCC_MIIM)
 	    - lan966x-switch (LAN966X_SWITCH)
 
+config SPRD_SC8830_AUDIO_TEST
+	bool "Speaker test tone for the Spreadtrum SC8830 (SC7730) codec"
+	depends on ARCH_SPRD || COMPILE_TEST
+	help
+	  Plays a short 300 Hz tone through the internal speaker amplifier of
+	  the SC2723S PMIC codec a few seconds after boot, driving the VBC and
+	  the codec by hand (no ALSA, no DMA). Audio bring-up aid for the
+	  Galaxy Tab A 7.0 (SM-T280).
+
 source "drivers/misc/c2port/Kconfig"
 source "drivers/misc/eeprom/Kconfig"
 source "drivers/misc/cb710/Kconfig"
