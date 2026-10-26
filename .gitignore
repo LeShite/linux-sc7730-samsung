@@ -1,0 +1,25 @@
+# kernel tree: has its own repo (src/linux-6.18.58, remote LeShite/linux-sc7730-samsung); the rest of src/ is third-party
+/src/
+# Samsung's proprietary firmware and the tablet's own partitions (efs, persdata, prodnv, nv items: IMEI/MAC/calibration)
+/android-fw/
+/backup/
+/twrp/
+/info/android/
+# big images and build output, rebuilt by scripts/
+/batocera-v38/
+/build/
+/out/
+/snapshots/
+/logs/
+/build-*.log
+/overlay.tar
+/tools/venv/
+/tools/src/
+/userdata/
+/old/
+__pycache__/
+*.img
+*.tar
+*.tar.gz
+*.xz
+/info/

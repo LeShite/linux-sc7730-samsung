@@ -1,0 +1,375 @@
+From ead5a884b5876c60531f4bf04fedb4040466cb25 Mon Sep 17 00:00:00 2001
+From: gtex-port <igomezv0921@gmail.com>
+Date: Sun, 25 Oct 2026 14:59:36 -0600
+Subject: [PATCH] Input: sc8830-keys: power, volume and home buttons of the
+ SM-T280 (v44)
+
+From the vendor kernel (sc_keypad.c and the board's DTS): power on the
+SC2723S's analog EIC 2 (low while pressed), volume down on EIC 10, volume up
+on the keypad controller's row 0 columns 0-1 and home on column 2. The EIC is
+behind the ADI bus and the keypad latches its events, so both are polled
+every 20 ms: no interrupt wiring needed. The idle levels are read at probe.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ arch/arm/boot/dts/unisoc/sc7730.dtsi |   8 +
+ arch/arm/configs/gtexswifi.config    |   3 +
+ drivers/input/keyboard/Kconfig       |   8 +
+ drivers/input/keyboard/Makefile      |   1 +
+ drivers/input/keyboard/sc8830-keys.c | 280 +++++++++++++++++++++++++++
+ 5 files changed, 300 insertions(+)
+ create mode 100644 drivers/input/keyboard/sc8830-keys.c
+
+diff --git a/arch/arm/boot/dts/unisoc/sc7730.dtsi b/arch/arm/boot/dts/unisoc/sc7730.dtsi
+index 3ee81fa38..9156e9e44 100644
+--- a/arch/arm/boot/dts/unisoc/sc7730.dtsi
++++ b/arch/arm/boot/dts/unisoc/sc7730.dtsi
+@@ -153,6 +153,14 @@ pmic: pmic@40030000 {
+ 			reg-names = "adi", "pmic";
+ 		};
+ 
++		/* Buttons: power and volume down on the PMIC's EIC, volume up and home on the keypad */
++		keys@40250000 {
++			compatible = "sprd,sc8830-keys";
++			reg = <0x40250000 0x1000>, <0x402e0000 0x4000>,
++			      <0x40030000 0x1000>, <0x40038000 0x1000>;
++			reg-names = "keypad", "aon", "adi", "pmic";
++		};
++
+ 		/* Speaker playback: VBC + AP DMA (channels 24/25) + SC2723S codec */
+ 		audio@40020000 {
+ 			compatible = "sprd,sc8830-audio";
+diff --git a/arch/arm/configs/gtexswifi.config b/arch/arm/configs/gtexswifi.config
+index 3941f8b39..891d98524 100644
+--- a/arch/arm/configs/gtexswifi.config
++++ b/arch/arm/configs/gtexswifi.config
+@@ -131,6 +131,9 @@ CONFIG_TOUCHSCREEN_MELFAS_MIP4=y
+ 
+ # input: evdev for EmulationStation, uinput for Batocera's pad mapper
+ CONFIG_INPUT_EVDEV=y
++# power, volume, home buttons
++CONFIG_INPUT_KEYBOARD=y
++CONFIG_KEYBOARD_SC8830=y
+ CONFIG_INPUT_JOYDEV=y
+ CONFIG_INPUT_MISC=y
+ CONFIG_INPUT_UINPUT=y
+diff --git a/drivers/input/keyboard/Kconfig b/drivers/input/keyboard/Kconfig
+index 2ff4fef32..06e614d83 100644
+--- a/drivers/input/keyboard/Kconfig
++++ b/drivers/input/keyboard/Kconfig
+@@ -671,6 +671,14 @@ config KEYBOARD_OMAP4
+ 	  To compile this driver as a module, choose M here: the
+ 	  module will be called omap4-keypad.
+ 
++config KEYBOARD_SC8830
++	tristate "Spreadtrum SC8830 (SC7730) buttons"
++	depends on ARCH_SPRD || COMPILE_TEST
++	help
++	  Power, volume and home buttons of the Samsung Galaxy Tab A 7.0
++	  (SM-T280): the SC2723S PMIC's EIC lines and the SoC's keypad
++	  controller, polled.
++
+ config KEYBOARD_SPEAR
+ 	tristate "ST SPEAR keyboard support"
+ 	depends on PLAT_SPEAR || COMPILE_TEST
+diff --git a/drivers/input/keyboard/Makefile b/drivers/input/keyboard/Makefile
+index 2d906e14f..4a197fe11 100644
+--- a/drivers/input/keyboard/Makefile
++++ b/drivers/input/keyboard/Makefile
+@@ -59,6 +59,7 @@ obj-$(CONFIG_KEYBOARD_QT2160)		+= qt2160.o
+ obj-$(CONFIG_KEYBOARD_SAMSUNG)		+= samsung-keypad.o
+ obj-$(CONFIG_KEYBOARD_SH_KEYSC)		+= sh_keysc.o
+ obj-$(CONFIG_KEYBOARD_SNVS_PWRKEY)	+= snvs_pwrkey.o
++obj-$(CONFIG_KEYBOARD_SC8830)		+= sc8830-keys.o
+ obj-$(CONFIG_KEYBOARD_SPEAR)		+= spear-keyboard.o
+ obj-$(CONFIG_KEYBOARD_STMPE)		+= stmpe-keypad.o
+ obj-$(CONFIG_KEYBOARD_STOWAWAY)		+= stowaway.o
+diff --git a/drivers/input/keyboard/sc8830-keys.c b/drivers/input/keyboard/sc8830-keys.c
+new file mode 100644
+index 000000000..035573a72
+--- /dev/null
++++ b/drivers/input/keyboard/sc8830-keys.c
+@@ -0,0 +1,280 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * Buttons of the Galaxy Tab A 7.0 (SM-T280, Spreadtrum SC7730 + SC2723S PMIC).
++ *
++ * From the vendor 3.10 kernel (drivers/input/keyboard/sc_keypad.c and the board's DTS):
++ *  - power:       analog EIC 2 (PBINT), low while pressed
++ *  - volume down: analog EIC 10
++ *  - volume up:   keypad controller, row 0, columns 0 and 1
++ *  - home:        keypad controller, row 0, column 2
++ * The analog EIC sits behind the ADI bus, so it is polled, as is the keypad controller's latched
++ * raw interrupt status (no interrupt line needed): every 20 ms, events are never lost because the
++ * controller latches them.
++ */
++
++#include <linux/bitfield.h>
++#include <linux/delay.h>
++#include <linux/input.h>
++#include <linux/io.h>
++#include <linux/iopoll.h>
++#include <linux/module.h>
++#include <linux/of.h>
++#include <linux/platform_device.h>
++#include <linux/workqueue.h>
++
++/* keypad controller (0x40250000) */
++#define KPD_CTRL		0x00
++#define  KPD_EN			BIT(0)
++#define  KPD_ROWS		GENMASK(17, 16)	/* rows 0-1: sprd,keypad-rows-choose-hw 0x30000 */
++#define  KPD_COLS		GENMASK(10, 8)	/* cols 0-2: sprd,keypad-cols-choose-hw 0x700 */
++#define KPD_INT_EN		0x04
++#define KPD_INT_RAW_STATUS	0x08
++#define KPD_INT_CLR		0x10
++#define  KPD_INT_ALL		0xfff
++#define  KPD_INT_DOWNUP		0x0ff
++#define KPD_POLARITY		0x18
++#define KPD_DEBOUNCE_CNT	0x1c
++#define KPD_LONG_KEY_CNT	0x20
++#define KPD_CLK_DIV_CNT		0x28
++#define KPD_KEY_STATUS		0x2c
++
++/* AON APB (0x402e0000): keypad clocks and reset */
++#define AON_APB_EB0		0x0000
++#define  AON_KPD_EB		BIT(8)
++#define AON_APB_RST0		0x0008
++#define  AON_KPD_SOFT_RST	BIT(8)
++#define AON_APB_RTC_EB		0x0010
++#define  AON_KPD_RTC_EB		BIT(1)
++
++/* PMIC, offsets in the ADI window at 0x40038000 */
++#define ANA_EIC_DATA		0x0100
++#define ANA_EIC_DMSK		0x0104
++#define EIC_POWER		2
++#define EIC_VOLDOWN		10
++#define ANA_GLB_ARM_MODULE_EN	0x0800
++#define  ANA_EIC_EN		BIT(3)
++#define ANA_GLB_RTC_CLK_EN	0x0808
++#define  RTC_EIC_EN		BIT(3)
++
++/* ADI controller (0x40030000), as in sc8830-audio.c */
++#define ADI_GSSI_CFG0		0x1c
++#define ADI_RD_CMD		0x24
++#define ADI_RD_DATA		0x28
++#define  ADI_RD_DATA_BUSY	BIT(31)
++#define  ADI_RD_DATA_ADDR	GENMASK(30, 16)
++#define  ADI_RD_DATA_VAL	GENMASK(15, 0)
++#define ADI_FIFO_STS		0x2c
++#define  ADI_FIFO_EMPTY		BIT(10)
++
++#define POLL_MS			20
++
++struct sc8830_keys {
++	struct device *dev;
++	void __iomem *kpd, *aon, *adi, *pmic;
++	phys_addr_t pmic_phys;
++	u32 addr_mask;
++	struct input_dev *input;
++	struct delayed_work poll;
++	u16 eic_idle;		/* EIC levels at probe, with nothing pressed */
++	u16 eic_last;		/* previous sample: a change counts once two samples agree */
++	bool power, voldown;
++};
++
++static int adi_read(struct sc8830_keys *k, u32 reg, u16 *val)
++{
++	u32 phys = k->pmic_phys + reg, data;
++	int ret;
++
++	writel(phys, k->adi + ADI_RD_CMD);
++	ret = readl_poll_timeout_atomic(k->adi + ADI_RD_DATA, data,
++					!(data & ADI_RD_DATA_BUSY), 1, 2000);
++	if (ret)
++		return ret;
++	if ((FIELD_GET(ADI_RD_DATA_ADDR, data) & k->addr_mask) != (phys & k->addr_mask))
++		return -EIO;
++	*val = FIELD_GET(ADI_RD_DATA_VAL, data);
++	return 0;
++}
++
++/* read-modify-write; the audio driver touches other bits of the same registers under its own lock */
++static void adi_set(struct sc8830_keys *k, u32 reg, u16 bits)
++{
++	u16 old;
++	u32 sts;
++
++	if (adi_read(k, reg, &old))
++		return;
++	writel(old | bits, k->pmic + reg);
++	readl_poll_timeout_atomic(k->adi + ADI_FIFO_STS, sts, sts & ADI_FIFO_EMPTY, 1, 1000);
++}
++
++static void upd(void __iomem *base, u32 reg, u32 mask, u32 val)
++{
++	writel((readl(base + reg) & ~mask) | (val & mask), base + reg);
++}
++
++/* row 0: columns 0 and 1 are both volume up (two contacts), column 2 home */
++static unsigned int kpd_code(unsigned int row, unsigned int col)
++{
++	if (row != 0)
++		return KEY_RESERVED;
++	return col == 2 ? KEY_HOMEPAGE : col <= 1 ? KEY_VOLUMEUP : KEY_RESERVED;
++}
++
++static void report(struct sc8830_keys *k, unsigned int code, bool down)
++{
++	if (code == KEY_RESERVED)
++		return;
++	dev_dbg(k->dev, "key %u %s\n", code, down ? "down" : "up");
++	input_report_key(k->input, code, down);
++	input_sync(k->input);
++}
++
++static void poll_work(struct work_struct *work)
++{
++	struct sc8830_keys *k = container_of(work, struct sc8830_keys, poll.work);
++	u32 raw, st;
++	u16 eic;
++	int i;
++
++	if (!adi_read(k, ANA_EIC_DATA, &eic) && eic == k->eic_last) {
++		bool power = (eic ^ k->eic_idle) & BIT(EIC_POWER);
++		bool voldown = (eic ^ k->eic_idle) & BIT(EIC_VOLDOWN);
++
++		if (power != k->power)
++			report(k, KEY_POWER, power);
++		if (voldown != k->voldown)
++			report(k, KEY_VOLUMEDOWN, voldown);
++		k->power = power;
++		k->voldown = voldown;
++	}
++	k->eic_last = eic;
++
++	/* the keypad's four event slots: press bit i, release bit i + 4; slot i in KEY_STATUS byte i */
++	raw = readl(k->kpd + KPD_INT_RAW_STATUS) & KPD_INT_DOWNUP;
++	if (raw) {
++		st = readl(k->kpd + KPD_KEY_STATUS);
++		writel(KPD_INT_ALL, k->kpd + KPD_INT_CLR);
++		for (i = 0; i < 4; i++) {
++			unsigned int code = kpd_code((st >> (8 * i + 4)) & 7, (st >> (8 * i)) & 7);
++
++			if (raw & BIT(i))
++				report(k, code, true);
++			if (raw & BIT(i + 4))
++				report(k, code, false);
++		}
++	}
++	schedule_delayed_work(&k->poll, msecs_to_jiffies(POLL_MS));
++}
++
++static void __iomem *map(struct platform_device *pdev, const char *name, phys_addr_t *phys)
++{
++	struct resource *res = platform_get_resource_byname(pdev, IORESOURCE_MEM, name);
++
++	if (!res)
++		return IOMEM_ERR_PTR(-EINVAL);
++	if (phys)
++		*phys = res->start;
++	/* not exclusive: the audio driver maps the AON, ADI and PMIC windows too */
++	return devm_ioremap(&pdev->dev, res->start, resource_size(res)) ?: IOMEM_ERR_PTR(-ENOMEM);
++}
++
++static void sc8830_keys_stop(void *data)
++{
++	cancel_delayed_work_sync(data);
++}
++
++static int sc8830_keys_probe(struct platform_device *pdev)
++{
++	struct device *dev = &pdev->dev;
++	struct sc8830_keys *k;
++	u32 cfg0, bits;
++	int ret;
++
++	k = devm_kzalloc(dev, sizeof(*k), GFP_KERNEL);
++	if (!k)
++		return -ENOMEM;
++	k->dev = dev;
++	k->kpd = map(pdev, "keypad", NULL);
++	k->aon = map(pdev, "aon", NULL);
++	k->adi = map(pdev, "adi", NULL);
++	k->pmic = map(pdev, "pmic", &k->pmic_phys);
++	if (IS_ERR(k->kpd) || IS_ERR(k->aon) || IS_ERR(k->adi) || IS_ERR(k->pmic))
++		return -ENOMEM;
++
++	cfg0 = readl(k->adi + ADI_GSSI_CFG0);
++	bits = (cfg0 & 0x3f) - ((cfg0 >> 11) & 0x1f) - 1;
++	if (bits > 13)
++		bits = 9;
++	k->addr_mask = GENMASK(bits + 1, 0);
++
++	/* analog EIC: module and clock on, the two lines' data unmasked */
++	adi_set(k, ANA_GLB_ARM_MODULE_EN, ANA_EIC_EN);
++	adi_set(k, ANA_GLB_RTC_CLK_EN, RTC_EIC_EN);
++	adi_set(k, ANA_EIC_DMSK, BIT(EIC_POWER) | BIT(EIC_VOLDOWN));
++	udelay(100);
++	ret = adi_read(k, ANA_EIC_DATA, &k->eic_idle);
++	if (ret)
++		return dev_err_probe(dev, ret, "cannot read the analog EIC\n");
++	/*
++	 * Pressed = away from the level read here (nobody holds a button while the kernel boots).
++	 * The vendor reads the power line as low while pressed; log it if it does not idle high.
++	 */
++	k->eic_last = k->eic_idle;
++	if (!(k->eic_idle & BIT(EIC_POWER)))
++		dev_warn(dev, "power line idles low (EIC %04x)\n", k->eic_idle);
++
++	/* keypad controller as the vendor's probe: reset, clocks, polarity, debounce, rows/cols */
++	upd(k->aon, AON_APB_RST0, AON_KPD_SOFT_RST, AON_KPD_SOFT_RST);
++	mdelay(2);
++	upd(k->aon, AON_APB_RST0, AON_KPD_SOFT_RST, 0);
++	upd(k->aon, AON_APB_EB0, AON_KPD_EB, AON_KPD_EB);
++	upd(k->aon, AON_APB_RTC_EB, AON_KPD_RTC_EB, AON_KPD_RTC_EB);
++	writel(KPD_INT_ALL, k->kpd + KPD_INT_CLR);
++	writel(0xffff, k->kpd + KPD_POLARITY);
++	writel(1, k->kpd + KPD_CLK_DIV_CNT);
++	writel(0xc, k->kpd + KPD_LONG_KEY_CNT);
++	writel(0x5, k->kpd + KPD_DEBOUNCE_CNT);
++	writel(KPD_INT_DOWNUP, k->kpd + KPD_INT_EN);	/* latches the raw status; no IRQ is requested */
++	writel(KPD_EN | KPD_ROWS | KPD_COLS, k->kpd + KPD_CTRL);
++
++	k->input = devm_input_allocate_device(dev);
++	if (!k->input)
++		return -ENOMEM;
++	k->input->name = "sc8830-keys";
++	k->input->phys = "sc8830-keys/input0";
++	k->input->id.bustype = BUS_HOST;
++	input_set_capability(k->input, EV_KEY, KEY_POWER);
++	input_set_capability(k->input, EV_KEY, KEY_VOLUMEUP);
++	input_set_capability(k->input, EV_KEY, KEY_VOLUMEDOWN);
++	input_set_capability(k->input, EV_KEY, KEY_HOMEPAGE);
++	ret = input_register_device(k->input);
++	if (ret)
++		return ret;
++
++	INIT_DELAYED_WORK(&k->poll, poll_work);
++	ret = devm_add_action_or_reset(dev, sc8830_keys_stop, &k->poll);
++	if (ret)
++		return ret;
++	schedule_delayed_work(&k->poll, msecs_to_jiffies(POLL_MS));
++	dev_info(dev, "EIC idle %04x, keypad ctrl %08x\n", k->eic_idle, readl(k->kpd + KPD_CTRL));
++	return 0;
++}
++
++static const struct of_device_id sc8830_keys_of_match[] = {
++	{ .compatible = "sprd,sc8830-keys" },
++	{ }
++};
++MODULE_DEVICE_TABLE(of, sc8830_keys_of_match);
++
++static struct platform_driver sc8830_keys_driver = {
++	.probe = sc8830_keys_probe,
++	.driver = {
++		.name = "sc8830-keys",
++		.of_match_table = sc8830_keys_of_match,
++	},
++};
++module_platform_driver(sc8830_keys_driver);
++
++MODULE_DESCRIPTION("Spreadtrum SC8830 buttons: power and volume down (PMIC EIC), keypad");
++MODULE_LICENSE("GPL");
+-- 
+2.56.0
+

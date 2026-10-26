@@ -1,0 +1,300 @@
+From f5df15c0fd8eb03f5efeea53c18ea7a02cf026f4 Mon Sep 17 00:00:00 2001
+From: gtex-port <igomezv0921@gmail.com>
+Date: Sat, 24 Oct 2026 17:30:36 -0600
+Subject: [PATCH 05/11] pmdomain: SC8830 GPU power domain; enable Lima;
+ simpledrm name for kmsro (v9)
+
+---
+ arch/arm/boot/dts/unisoc/sc7730.dtsi  |  25 +++++-
+ arch/arm/configs/gtexswifi.config     |   8 ++
+ drivers/gpu/drm/sysfb/Kconfig         |  10 +++
+ drivers/gpu/drm/sysfb/simpledrm.c     |   2 +-
+ drivers/pmdomain/Kconfig              |   1 +
+ drivers/pmdomain/Makefile             |   1 +
+ drivers/pmdomain/sprd/Kconfig         |  10 +++
+ drivers/pmdomain/sprd/Makefile        |   2 +
+ drivers/pmdomain/sprd/sc8830-gpu-pd.c | 117 ++++++++++++++++++++++++++
+ 9 files changed, 173 insertions(+), 3 deletions(-)
+ create mode 100644 drivers/pmdomain/sprd/Kconfig
+ create mode 100644 drivers/pmdomain/sprd/Makefile
+ create mode 100644 drivers/pmdomain/sprd/sc8830-gpu-pd.c
+
+diff --git a/arch/arm/boot/dts/unisoc/sc7730.dtsi b/arch/arm/boot/dts/unisoc/sc7730.dtsi
+index 37645e356..8a91d7bb7 100644
+--- a/arch/arm/boot/dts/unisoc/sc7730.dtsi
++++ b/arch/arm/boot/dts/unisoc/sc7730.dtsi
+@@ -50,6 +50,14 @@ clk32k: clock-32k {
+ 		clock-output-names = "clk32k";
+ 	};
+ 
++	/* set up by gpu_pd: the 384 MHz parent, divider 1 */
++	gpu_clk: clock-gpu {
++		compatible = "fixed-clock";
++		#clock-cells = <0>;
++		clock-frequency = <384000000>;
++		clock-output-names = "gpu";
++	};
++
+ 	soc {
+ 		compatible = "simple-bus";
+ 		#address-cells = <1>;
+@@ -109,6 +117,16 @@ emmc: mmc@20600000 {
+ 			status = "disabled";
+ 		};
+ 
++		/* PMU PD_GPU_TOP_CFG, AON APB_EB0 (shared), GPU APB */
++		gpu_pd: power-controller@402b0020 {
++			compatible = "sprd,sc8830-gpu-pd";
++			reg = <0x402b0020 0x4>,
++			      <0x402e0000 0x4>,
++			      <0x60100000 0x8>;
++			reg-names = "pmu", "aon", "gpu";
++			#power-domain-cells = <0>;
++		};
++
+ 		gpu: gpu@60000000 {
+ 			compatible = "arm,mali-400";
+ 			reg = <0x60000000 0x10000>;
+@@ -118,10 +136,13 @@ gpu: gpu@60000000 {
+ 				     <GIC_SPI 39 IRQ_TYPE_LEVEL_HIGH>,
+ 				     <GIC_SPI 39 IRQ_TYPE_LEVEL_HIGH>,
+ 				     <GIC_SPI 39 IRQ_TYPE_LEVEL_HIGH>,
++				     <GIC_SPI 39 IRQ_TYPE_LEVEL_HIGH>,
+ 				     <GIC_SPI 39 IRQ_TYPE_LEVEL_HIGH>;
+ 			interrupt-names = "gp", "gpmmu", "pp0", "ppmmu0",
+-					  "pp1", "ppmmu1";
+-			status = "disabled";
++					  "pp1", "ppmmu1", "pmu";
++			clocks = <&gpu_clk>, <&gpu_clk>;
++			clock-names = "bus", "core";
++			power-domains = <&gpu_pd>;
+ 		};
+ 	};
+ };
+diff --git a/arch/arm/configs/gtexswifi.config b/arch/arm/configs/gtexswifi.config
+index 701a0cdc0..30e2a01cf 100644
+--- a/arch/arm/configs/gtexswifi.config
++++ b/arch/arm/configs/gtexswifi.config
+@@ -96,6 +96,14 @@ CONFIG_NET=y
+ CONFIG_UNIX=y
+ CONFIG_INET=y
+ CONFIG_PACKET=y
++# GPU: Mali-400 MP2 through Lima. Batocera's Mesa only has kmsro targets
++# (sun4i-drm, rockchip, ...), so simpledrm introduces itself as sun4i-drm,
++# the display driver of the H3 build this userspace comes from.
++CONFIG_PM=y
++CONFIG_SPRD_SC8830_GPU_PD=y
++CONFIG_DRM_LIMA=y
++CONFIG_DRM_SIMPLEDRM_NAME="sun4i-drm"
++
+ # input: evdev for EmulationStation, uinput for Batocera's pad mapper
+ CONFIG_INPUT_EVDEV=y
+ CONFIG_INPUT_JOYDEV=y
+diff --git a/drivers/gpu/drm/sysfb/Kconfig b/drivers/gpu/drm/sysfb/Kconfig
+index 9c9884c7e..abc2f58f4 100644
+--- a/drivers/gpu/drm/sysfb/Kconfig
++++ b/drivers/gpu/drm/sysfb/Kconfig
+@@ -57,6 +57,16 @@ config DRM_SIMPLEDRM
+ 	  On x86 BIOS or UEFI systems, you should also select SYSFB_SIMPLEFB
+ 	  to use UEFI and VESA framebuffers.
+ 
++config DRM_SIMPLEDRM_NAME
++	string "DRM driver name reported by simpledrm"
++	depends on DRM_SIMPLEDRM
++	default "simpledrm"
++	help
++	  Userspace sees this name in drmGetVersion(). Mesa picks its driver
++	  from it, and a render-only GPU (such as a Mali-400 under Lima)
++	  only gets used through kmsro when the display driver has a name
++	  Mesa knows, for example "sun4i-drm".
++
+ config DRM_VESADRM
+ 	tristate "VESA framebuffer driver"
+ 	depends on DRM && MMU && X86 && (!SYSFB_SIMPLEFB || COMPILE_TEST)
+diff --git a/drivers/gpu/drm/sysfb/simpledrm.c b/drivers/gpu/drm/sysfb/simpledrm.c
+index 22f8caab3..2488b9d6e 100644
+--- a/drivers/gpu/drm/sysfb/simpledrm.c
++++ b/drivers/gpu/drm/sysfb/simpledrm.c
+@@ -28,7 +28,7 @@
+ 
+ #include "drm_sysfb_helper.h"
+ 
+-#define DRIVER_NAME	"simpledrm"
++#define DRIVER_NAME	CONFIG_DRM_SIMPLEDRM_NAME
+ #define DRIVER_DESC	"DRM driver for simple-framebuffer platform devices"
+ #define DRIVER_MAJOR	1
+ #define DRIVER_MINOR	0
+diff --git a/drivers/pmdomain/Kconfig b/drivers/pmdomain/Kconfig
+index 23076ae90..6d45e1dbd 100644
+--- a/drivers/pmdomain/Kconfig
++++ b/drivers/pmdomain/Kconfig
+@@ -12,6 +12,7 @@ source "drivers/pmdomain/mediatek/Kconfig"
+ source "drivers/pmdomain/qcom/Kconfig"
+ source "drivers/pmdomain/renesas/Kconfig"
+ source "drivers/pmdomain/rockchip/Kconfig"
++source "drivers/pmdomain/sprd/Kconfig"
+ source "drivers/pmdomain/samsung/Kconfig"
+ source "drivers/pmdomain/st/Kconfig"
+ source "drivers/pmdomain/starfive/Kconfig"
+diff --git a/drivers/pmdomain/Makefile b/drivers/pmdomain/Makefile
+index ebc802f13..ef9cf2995 100644
+--- a/drivers/pmdomain/Makefile
++++ b/drivers/pmdomain/Makefile
+@@ -10,6 +10,7 @@ obj-y					+= mediatek/
+ obj-y					+= qcom/
+ obj-y					+= renesas/
+ obj-y					+= rockchip/
++obj-y					+= sprd/
+ obj-y					+= samsung/
+ obj-y					+= st/
+ obj-y					+= starfive/
+diff --git a/drivers/pmdomain/sprd/Kconfig b/drivers/pmdomain/sprd/Kconfig
+new file mode 100644
+index 000000000..b50881785
+--- /dev/null
++++ b/drivers/pmdomain/sprd/Kconfig
+@@ -0,0 +1,10 @@
++# SPDX-License-Identifier: GPL-2.0-only
++
++config SPRD_SC8830_GPU_PD
++	bool "Spreadtrum SC8830 family GPU power domain"
++	depends on ARCH_SPRD || COMPILE_TEST
++	depends on PM
++	select PM_GENERIC_DOMAINS
++	help
++	  Powers up the Mali-400 GPU of 32-bit Spreadtrum SC8830 family SoCs
++	  such as the SC7730, so that the Lima driver can use it.
+diff --git a/drivers/pmdomain/sprd/Makefile b/drivers/pmdomain/sprd/Makefile
+new file mode 100644
+index 000000000..6d28d5e0b
+--- /dev/null
++++ b/drivers/pmdomain/sprd/Makefile
+@@ -0,0 +1,2 @@
++# SPDX-License-Identifier: GPL-2.0-only
++obj-$(CONFIG_SPRD_SC8830_GPU_PD)	+= sc8830-gpu-pd.o
+diff --git a/drivers/pmdomain/sprd/sc8830-gpu-pd.c b/drivers/pmdomain/sprd/sc8830-gpu-pd.c
+new file mode 100644
+index 000000000..4804c28e3
+--- /dev/null
++++ b/drivers/pmdomain/sprd/sc8830-gpu-pd.c
+@@ -0,0 +1,117 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * GPU power domain of the Spreadtrum SC8830 family (SC7730, ...)
++ *
++ * Powers the Mali-400 up the way the vendor 3.10 clock tree does
++ * (chip_x30g/__clock_tree.h: clk_gpu_top_i, clk_gpu_i, clk_gpu):
++ *  - PMU APB PD_GPU_TOP_CFG: clear FORCE_SHUTDOWN (and AUTO_SHUTDOWN_EN);
++ *  - AON APB APB_EB0: set GPU_EB;
++ *  - GPU APB APB_CLK_CTRL: select the 384 MHz parent, divider 1.
++ * The domain is kept always on for now.
++ */
++
++#include <linux/delay.h>
++#include <linux/io.h>
++#include <linux/of.h>
++#include <linux/platform_device.h>
++#include <linux/pm_domain.h>
++
++#define SC8830_PD_GPU_TOP_FORCE_SHUTDOWN	BIT(25)
++#define SC8830_PD_GPU_TOP_AUTO_SHUTDOWN_EN	BIT(24)
++#define SC8830_AON_APB_EB0_GPU_EB		BIT(27)
++#define SC8830_GPU_APB_CLK_CTRL			0x4
++#define SC8830_GPU_CLK_SEL_MASK			GENMASK(2, 0)
++#define SC8830_GPU_CLK_DIV_MASK			GENMASK(5, 4)
++#define SC8830_GPU_CLK_SEL_384M			5
++
++struct sc8830_gpu_pd {
++	struct generic_pm_domain genpd;
++	void __iomem *pmu;
++	void __iomem *aon;
++	void __iomem *gpu;
++};
++
++static void sc8830_gpu_pd_rmw(void __iomem *reg, u32 clr, u32 set)
++{
++	writel((readl(reg) & ~clr) | set, reg);
++}
++
++static int sc8830_gpu_pd_power_on(struct generic_pm_domain *genpd)
++{
++	struct sc8830_gpu_pd *pd = container_of(genpd, struct sc8830_gpu_pd, genpd);
++
++	sc8830_gpu_pd_rmw(pd->pmu, SC8830_PD_GPU_TOP_FORCE_SHUTDOWN |
++			  SC8830_PD_GPU_TOP_AUTO_SHUTDOWN_EN, 0);
++	usleep_range(200, 300);
++	sc8830_gpu_pd_rmw(pd->aon, 0, SC8830_AON_APB_EB0_GPU_EB);
++	sc8830_gpu_pd_rmw(pd->gpu + SC8830_GPU_APB_CLK_CTRL,
++			  SC8830_GPU_CLK_SEL_MASK | SC8830_GPU_CLK_DIV_MASK,
++			  SC8830_GPU_CLK_SEL_384M);
++	usleep_range(10, 20);
++
++	return 0;
++}
++
++static void __iomem *sc8830_gpu_pd_map(struct platform_device *pdev,
++				       const char *name)
++{
++	struct resource *res;
++
++	/* The AON APB register is shared with the timer: map, don't request */
++	res = platform_get_resource_byname(pdev, IORESOURCE_MEM, name);
++	if (!res)
++		return IOMEM_ERR_PTR(-EINVAL);
++
++	return devm_ioremap(&pdev->dev, res->start, resource_size(res)) ?:
++	       IOMEM_ERR_PTR(-ENOMEM);
++}
++
++static int sc8830_gpu_pd_probe(struct platform_device *pdev)
++{
++	struct sc8830_gpu_pd *pd;
++	int ret;
++
++	pd = devm_kzalloc(&pdev->dev, sizeof(*pd), GFP_KERNEL);
++	if (!pd)
++		return -ENOMEM;
++
++	pd->pmu = sc8830_gpu_pd_map(pdev, "pmu");
++	pd->aon = sc8830_gpu_pd_map(pdev, "aon");
++	pd->gpu = sc8830_gpu_pd_map(pdev, "gpu");
++	if (IS_ERR(pd->pmu) || IS_ERR(pd->aon) || IS_ERR(pd->gpu))
++		return -EINVAL;
++
++	dev_info(&pdev->dev, "before: pd_cfg %08x eb0 %08x clk %08x rst %08x\n",
++		 readl(pd->pmu), readl(pd->aon),
++		 readl(pd->gpu + SC8830_GPU_APB_CLK_CTRL), readl(pd->gpu));
++
++	pd->genpd.name = "gpu";
++	pd->genpd.power_on = sc8830_gpu_pd_power_on;
++	pd->genpd.flags = GENPD_FLAG_ALWAYS_ON;
++	sc8830_gpu_pd_power_on(&pd->genpd);
++
++	dev_info(&pdev->dev, "after:  pd_cfg %08x eb0 %08x clk %08x rst %08x\n",
++		 readl(pd->pmu), readl(pd->aon),
++		 readl(pd->gpu + SC8830_GPU_APB_CLK_CTRL), readl(pd->gpu));
++
++	ret = pm_genpd_init(&pd->genpd, NULL, false);
++	if (ret)
++		return ret;
++
++	return of_genpd_add_provider_simple(pdev->dev.of_node, &pd->genpd);
++}
++
++static const struct of_device_id sc8830_gpu_pd_of_match[] = {
++	{ .compatible = "sprd,sc8830-gpu-pd" },
++	{ }
++};
++
++static struct platform_driver sc8830_gpu_pd_driver = {
++	.probe = sc8830_gpu_pd_probe,
++	.driver = {
++		.name = "sc8830-gpu-pd",
++		.of_match_table = sc8830_gpu_pd_of_match,
++		.suppress_bind_attrs = true,
++	},
++};
++builtin_platform_driver(sc8830_gpu_pd_driver);
+-- 
+2.56.0
+

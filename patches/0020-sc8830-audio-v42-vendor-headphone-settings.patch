@@ -1,0 +1,119 @@
+From 64db1f73ba7aa17260fa656d9d4025641b394d74 Mon Sep 17 00:00:00 2001
+From: gtex-port <igomezv0921@gmail.com>
+Date: Sun, 25 Oct 2026 14:03:53 -0600
+Subject: [PATCH] sc8830-audio: vendor headphone settings read back under TWRP,
+ Auto output (v42)
+
+With the vendor kernel under TWRP the headphones play the same signal in both
+ears; v41 gave each earpiece only L - R. The vendor's registers while playing:
+HPL_CGL/HPR_CGR on (the "HPLCGL/HPRCGR Switch" controls default to 1), class-G
+gain 1 at 63 (Android's tiny_hw.xml), and on this SC2723 version M
+(is_low_power_support()) CG_LPW 2 and ANA_CDC16 bias currents 0xee1e.
+
+The EIC jack line works (high = plugged in), so the output defaults to Auto.
+Headphone gain 8 (-12 dB) as Android.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ sound/arm/sc8830-audio.c | 43 ++++++++++++++++++++++++++++++++--------
+ 1 file changed, 35 insertions(+), 8 deletions(-)
+
+diff --git a/sound/arm/sc8830-audio.c b/sound/arm/sc8830-audio.c
+index e1713a66b..eb2b7022e 100644
+--- a/sound/arm/sc8830-audio.c
++++ b/sound/arm/sc8830-audio.c
+@@ -205,6 +205,12 @@
+ #define  CG_G_1			GENMASK(15, 10)
+ #define  CG_G_2			GENMASK(9, 7)
+ #define ANA_CDC16		0x065c
++#define  HP_CLASSAB_IBIS	GENMASK(15, 14)	/* bias currents, set for SC2723 E/T/M */
++#define  RCV_IBIS		GENMASK(13, 12)
++#define  DAC_FILTER_IBIS	GENMASK(11, 10)
++#define  ADC_PGA_IBIAS		GENMASK(9, 8)
++#define  POP_CHGR_PD		BIT(2)
++#define  POP_SOFTCHG_EN		BIT(1)
+ #define  HP_POP_CTL		GENMASK(7, 6)
+ #define  HP_POP_STEP		GENMASK(5, 3)
+ #define ANA_HDT0		0x0668		/* headset detection */
+@@ -349,6 +355,7 @@ struct sc8830_audio {
+ 	unsigned int jack_logs;
+ 	struct delayed_work jack;	/* polls the jack, also while nothing plays */
+ 	bool chip_aa;			/* SC2723 version AA: DANGL/DANGR with the class-G amp */
++	bool low_power;			/* SC2723 E/T/M (this tablet: M): the vendor's low-power settings */
+ };
+ 
+ /* DAALCCTL0-10 of the vendor's default DA profile (vbc_da_eq_profile_default) */
+@@ -500,7 +507,9 @@ static void hp_on(struct sc8830_audio *sa)
+ 	adi_upd(sa, ANA_CDC16, HP_POP_CTL, FIELD_PREP(HP_POP_CTL, 3));	/* hold */
+ 
+ 	/* sprd_inter_headphone_pa(): class-G reference, rail, charge pump */
+-	adi_upd(sa, ANA_CDC3, CG_LPW | CG_CHP_OSC, FIELD_PREP(CG_LPW, 0) | FIELD_PREP(CG_CHP_OSC, 1));
++	/* CG_LPW 2: sprd_codec_hp_pa_lpw() on a low-power chip (is_low_power_support(): SC2723 E/T/M) */
++	adi_upd(sa, ANA_CDC3, CG_LPW | CG_CHP_OSC,
++		FIELD_PREP(CG_LPW, sa->low_power ? 2 : 0) | FIELD_PREP(CG_CHP_OSC, 1));
+ 	adi_upd(sa, ANA_CDC3, CG_REF_EN, CG_REF_EN);
+ 	adi_upd(sa, ANA_PMU0, LDOCG_EN, LDOCG_EN);
+ 	adi_upd(sa, ANA_CDC3, CG_CHP_EN, CG_CHP_EN);
+@@ -511,8 +520,9 @@ static void hp_on(struct sc8830_audio *sa)
+ 		adi_upd(sa, DANGL, 0xffff, 0xffff);
+ 		adi_upd(sa, DANGR, 0xffff, 0xffff);
+ 	}
+-	adi_upd(sa, ANA_CDC13, CG_G_1 | CG_G_2, FIELD_PREP(CG_G_1, 0x10) | FIELD_PREP(CG_G_2, 7));
+-	adi_upd(sa, ANA_CDC14, CG_G_1 | CG_G_2, FIELD_PREP(CG_G_1, 0x10) | FIELD_PREP(CG_G_2, 7));
++	/* the kernel's 0x10, then Android's tiny_hw.xml "HPL/HPR CG Playback Volume1" 63 and "...Volume2" 7 */
++	adi_upd(sa, ANA_CDC13, CG_G_1 | CG_G_2, FIELD_PREP(CG_G_1, 63) | FIELD_PREP(CG_G_2, 7));
++	adi_upd(sa, ANA_CDC14, CG_G_1 | CG_G_2, FIELD_PREP(CG_G_1, 63) | FIELD_PREP(CG_G_2, 7));
+ 	msleep(30);
+ 
+ 	/* HPL/HPR switches, differential mode, bias ramp off; then DAC L -> HPL and DAC R -> HPR */
+@@ -703,6 +713,18 @@ static void codec_power_on(struct sc8830_audio *sa)
+ 	 */
+ 	adi_upd(sa, ANA_HDT1, GND_DET_PU_PD | HEAD_L_INT_PU_PD, HEAD_L_INT_PU_PD);
+ 	adi_upd(sa, ANA_PMU0, GND_PLGPD_EN, GND_PLGPD_EN);
++	/*
++	 * sprd_codec_analog_open() on a low-power chip: bias currents and the pop circuit's
++	 * charger (ANA_CDC16 0xee1e on the tablet under the vendor kernel), class-G calibration on
++	 */
++	if (sa->low_power) {
++		adi_upd(sa, ANA_CDC16, HP_CLASSAB_IBIS | RCV_IBIS | DAC_FILTER_IBIS | ADC_PGA_IBIAS |
++			POP_CHGR_PD | POP_SOFTCHG_EN,
++			FIELD_PREP(HP_CLASSAB_IBIS, 3) | FIELD_PREP(RCV_IBIS, 2) |
++			FIELD_PREP(DAC_FILTER_IBIS, 3) | FIELD_PREP(ADC_PGA_IBIAS, 2) |
++			POP_CHGR_PD | POP_SOFTCHG_EN);
++		adi_upd(sa, ANA_CDC3, CG_HPCAL_EN, CG_HPCAL_EN);
++	}
+ 
+ 	/* DAPM order of the vendor driver: clocks, DAC switches, mixer into AOL */
+ 	adi_upd(sa, ANA_CDC0, DAC_CLK_EN, DAC_CLK_EN);
+@@ -1733,9 +1755,10 @@ static int sc8830_audio_probe(struct platform_device *pdev)
+ 	sa->boost = 0;
+ 	sa->mix = MIX_LEFT;
+ 	sa->write_mode = false;
+-	/* both outputs until the insert flag's polarity is confirmed on the hardware */
+-	sa->out = OUT_BOTH;
+-	sa->hp_gain = 6;	/* the vendor's Headset volume levels run from 4 to 11 */
++	/* the EIC jack line works (high = plugged in): headphones when plugged, else the speaker */
++	sa->out = OUT_AUTO;
++	sa->hp_gain = 8;	/* Android's tiny_hw.xml "HPL/HPR Playback Volume": -12 dB */
++	sa->hp_cg_link = true;	/* the vendor's "HPLCGL/HPRCGR Switch" default: without it L - R only */
+ 	sa->jack_raw = -1;
+ 
+ 	sa->vbc = map(pdev, "vbc", NULL);
+@@ -1762,8 +1785,12 @@ static int sc8830_audio_probe(struct platform_device *pdev)
+ 
+ 		/* the vendor's sci_get_ana_chip_ver() == AUDIO_2723_VER_AA */
+ 		sa->chip_aa = hi == 0x2723 && !(lo & 0xfff);
+-		dev_info(dev, "PMIC chip id %04x%04x, version %03x%s\n", hi, lo, lo & 0xfff,
+-			 sa->chip_aa ? " (AA: DANGL/DANGR with the headphone amp)" : "");
++		/* is_low_power_support(): AUDIO_2723_VER_E/T/M */
++		sa->low_power = hi == 0x2723 && ((lo & 0xfff) == 0x090 || (lo & 0xfff) == 0x0c0 ||
++						 (lo & 0xfff) == 0x0c1);
++		dev_info(dev, "PMIC chip id %04x%04x, version %03x%s%s\n", hi, lo, lo & 0xfff,
++			 sa->chip_aa ? " (AA: DANGL/DANGR with the headphone amp)" : "",
++			 sa->low_power ? " (low power: E/T/M)" : "");
+ 	}
+ 
+ 	/* the AP DMA must be clocked before any of its registers is touched */
+-- 
+2.56.0
+

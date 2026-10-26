@@ -1,0 +1,234 @@
+From 3877592edcb561d329ebf1d72b93d081be887e1a Mon Sep 17 00:00:00 2001
+From: gtex-port <igomezv0921@gmail.com>
+Date: Sun, 25 Oct 2026 15:11:26 -0600
+Subject: [PATCH] backlight: sc8830-dsi-bl: SM-T280 panel brightness over DSI
+ DCS (v46)
+
+The S6D7AA0X11 panel takes its brightness as the DCS command 0x51. The
+bootloader leaves the DesignWare DSI host running in video mode (simpledrm
+scans out its framebuffer), so queue DCS short writes on its generic
+interface: 53 2C at probe (the vendor's backlight-on), then 51 xx through
+the vendor's brightness curve. Gives Batocera a /sys/class/backlight/panel
+and lets the power button turn the screen off.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ arch/arm/boot/dts/unisoc/sc7730.dtsi    |   6 +
+ arch/arm/configs/gtexswifi.config       |   3 +
+ drivers/video/backlight/Kconfig         |   8 ++
+ drivers/video/backlight/Makefile        |   1 +
+ drivers/video/backlight/sc8830-dsi-bl.c | 140 ++++++++++++++++++++++++
+ 5 files changed, 158 insertions(+)
+ create mode 100644 drivers/video/backlight/sc8830-dsi-bl.c
+
+diff --git a/arch/arm/boot/dts/unisoc/sc7730.dtsi b/arch/arm/boot/dts/unisoc/sc7730.dtsi
+index 9156e9e44..b11904e1a 100644
+--- a/arch/arm/boot/dts/unisoc/sc7730.dtsi
++++ b/arch/arm/boot/dts/unisoc/sc7730.dtsi
+@@ -153,6 +153,12 @@ pmic: pmic@40030000 {
+ 			reg-names = "adi", "pmic";
+ 		};
+ 
++		/* Panel brightness: DCS commands through the DSI host (DesignWare 1.21a) */
++		backlight@21800000 {
++			compatible = "sprd,sc8830-dsi-backlight";
++			reg = <0x21800000 0x1000>;
++		};
++
+ 		/* Buttons: power and volume down on the PMIC's EIC, volume up and home on the keypad */
+ 		keys@40250000 {
+ 			compatible = "sprd,sc8830-keys";
+diff --git a/arch/arm/configs/gtexswifi.config b/arch/arm/configs/gtexswifi.config
+index 891d98524..662618118 100644
+--- a/arch/arm/configs/gtexswifi.config
++++ b/arch/arm/configs/gtexswifi.config
+@@ -134,6 +134,9 @@ CONFIG_INPUT_EVDEV=y
+ # power, volume, home buttons
+ CONFIG_INPUT_KEYBOARD=y
+ CONFIG_KEYBOARD_SC8830=y
++# panel brightness (DCS over the DSI host the bootloader started)
++CONFIG_BACKLIGHT_CLASS_DEVICE=y
++CONFIG_BACKLIGHT_SC8830_DSI=y
+ CONFIG_INPUT_JOYDEV=y
+ CONFIG_INPUT_MISC=y
+ CONFIG_INPUT_UINPUT=y
+diff --git a/drivers/video/backlight/Kconfig b/drivers/video/backlight/Kconfig
+index d9374d208..a8bb2e44b 100644
+--- a/drivers/video/backlight/Kconfig
++++ b/drivers/video/backlight/Kconfig
+@@ -242,6 +242,14 @@ config BACKLIGHT_HP700
+ 	  If you have an HP Jornada 700 series,
+ 	  say Y to include backlight control driver.
+ 
++config BACKLIGHT_SC8830_DSI
++	tristate "SM-T280 panel backlight through DSI DCS commands"
++	depends on ARCH_SPRD || COMPILE_TEST
++	help
++	  Brightness of the Samsung Galaxy Tab A 7.0 (SM-T280) panel: DCS
++	  "write display brightness" queued on the DSI host the bootloader
++	  left running.
++
+ config BACKLIGHT_PWM
+ 	tristate "Generic PWM based Backlight Driver"
+ 	depends on PWM
+diff --git a/drivers/video/backlight/Makefile b/drivers/video/backlight/Makefile
+index dfbb169bf..43d59a2cf 100644
+--- a/drivers/video/backlight/Makefile
++++ b/drivers/video/backlight/Makefile
+@@ -50,6 +50,7 @@ obj-$(CONFIG_BACKLIGHT_MP3309C)		+= mp3309c.o
+ obj-$(CONFIG_BACKLIGHT_MT6370)		+= mt6370-backlight.o
+ obj-$(CONFIG_BACKLIGHT_OMAP1)		+= omap1_bl.o
+ obj-$(CONFIG_BACKLIGHT_PANDORA)		+= pandora_bl.o
++obj-$(CONFIG_BACKLIGHT_SC8830_DSI)	+= sc8830-dsi-bl.o
+ obj-$(CONFIG_BACKLIGHT_PWM)		+= pwm_bl.o
+ obj-$(CONFIG_BACKLIGHT_QCOM_WLED)	+= qcom-wled.o
+ obj-$(CONFIG_BACKLIGHT_RT4831)		+= rt4831-backlight.o
+diff --git a/drivers/video/backlight/sc8830-dsi-bl.c b/drivers/video/backlight/sc8830-dsi-bl.c
+new file mode 100644
+index 000000000..1773044ec
+--- /dev/null
++++ b/drivers/video/backlight/sc8830-dsi-bl.c
+@@ -0,0 +1,140 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * Backlight of the Galaxy Tab A 7.0 (SM-T280): the S6D7AA0X11 panel dims itself on the DCS command
++ * "write display brightness" (0x51) sent over MIPI DSI. The bootloader leaves the SC7730's DSI host
++ * (Synopsys DesignWare 1.21a at 0x21800000) running in video mode and simpledrm scans out its
++ * framebuffer; this only queues DCS short writes through the host's generic interface, which the
++ * host sends in the blanking periods.
++ *
++ * From the vendor 3.10 kernel: sprd-dsi-panel-dsi_s6d7aa0x11_gtexswifi_video.dtsi
++ * (backlight-on 53 2C, set-brightness 51 xx), the board's gen-panel-backlight curve, and
++ * drivers/video/sprdfb/dsi_1_21a (GEN_HDR, CMD_PKT_STATUS).
++ */
++
++#include <linux/backlight.h>
++#include <linux/io.h>
++#include <linux/iopoll.h>
++#include <linux/module.h>
++#include <linux/of.h>
++#include <linux/platform_device.h>
++
++#define DSI_VERSION		0x00
++#define DSI_CMD_MODE_CFG	0x68
++#define DSI_GEN_HDR		0x6c
++#define DSI_CMD_PKT_STATUS	0x74
++#define  GEN_CMD_EMPTY		BIT(0)
++#define  GEN_CMD_FULL		BIT(1)
++
++#define DCS_SHORT_WRITE_PARAM	0x15
++#define DCS_WRITE_BRIGHTNESS	0x51
++#define DCS_WRITE_CTRL_DISPLAY	0x53
++#define  CTRL_BCTRL_DD_BL	0x2c	/* the vendor's backlight-on value */
++
++#define BRIGHTNESS_DEFAULT	143	/* the vendor's DEF point */
++
++struct sc8830_bl {
++	struct device *dev;
++	void __iomem *dsi;
++};
++
++/* the vendor's backlight-brt-range: user level -> panel value, linear between the points */
++static const u8 brt_curve[][2] = {
++	{ 0, 0 }, { 10, 3 }, { 20, 11 }, { 143, 95 }, { 255, 202 },
++};
++
++static u8 panel_level(int level)
++{
++	int i;
++
++	for (i = 1; i < ARRAY_SIZE(brt_curve); i++)
++		if (level <= brt_curve[i][0]) {
++			int x0 = brt_curve[i - 1][0], y0 = brt_curve[i - 1][1];
++			int x1 = brt_curve[i][0], y1 = brt_curve[i][1];
++
++			return y0 + (level - x0) * (y1 - y0) / (x1 - x0);
++		}
++	return brt_curve[ARRAY_SIZE(brt_curve) - 1][1];
++}
++
++static int dcs_write1(struct sc8830_bl *b, u8 cmd, u8 param)
++{
++	u32 sts;
++	int ret;
++
++	ret = readl_poll_timeout(b->dsi + DSI_CMD_PKT_STATUS, sts, !(sts & GEN_CMD_FULL), 20, 20000);
++	if (ret)
++		return ret;
++	writel((param << 16) | (cmd << 8) | DCS_SHORT_WRITE_PARAM, b->dsi + DSI_GEN_HDR);
++	/* sent once the queue drains (the next blanking period) */
++	return readl_poll_timeout(b->dsi + DSI_CMD_PKT_STATUS, sts, sts & GEN_CMD_EMPTY, 20, 50000);
++}
++
++static int sc8830_bl_update(struct backlight_device *bd)
++{
++	struct sc8830_bl *b = bl_get_data(bd);
++	int level = backlight_get_brightness(bd);	/* 0 when blanked or powered down */
++	int ret = dcs_write1(b, DCS_WRITE_BRIGHTNESS, panel_level(level));
++
++	if (ret)
++		dev_warn(b->dev, "brightness %d not sent: %d\n", level, ret);
++	return ret;
++}
++
++static const struct backlight_ops sc8830_bl_ops = {
++	.options = BL_CORE_SUSPENDRESUME,
++	.update_status = sc8830_bl_update,
++};
++
++static int sc8830_bl_probe(struct platform_device *pdev)
++{
++	struct backlight_properties props = {
++		.type = BACKLIGHT_RAW,
++		.max_brightness = 255,
++		.brightness = BRIGHTNESS_DEFAULT,
++		.scale = BACKLIGHT_SCALE_NON_LINEAR,
++	};
++	struct device *dev = &pdev->dev;
++	struct backlight_device *bd;
++	struct sc8830_bl *b;
++	u32 ver;
++
++	b = devm_kzalloc(dev, sizeof(*b), GFP_KERNEL);
++	if (!b)
++		return -ENOMEM;
++	b->dev = dev;
++	b->dsi = devm_platform_ioremap_resource(pdev, 0);
++	if (IS_ERR(b->dsi))
++		return PTR_ERR(b->dsi);
++
++	ver = readl(b->dsi + DSI_VERSION);
++	dev_info(dev, "DSI host version %08x, cmd mode cfg %08x, pkt status %08x\n", ver,
++		 readl(b->dsi + DSI_CMD_MODE_CFG), readl(b->dsi + DSI_CMD_PKT_STATUS));
++	if (!ver || ver == ~0u)
++		return dev_err_probe(dev, -ENODEV, "DSI host not running\n");
++
++	if (dcs_write1(b, DCS_WRITE_CTRL_DISPLAY, CTRL_BCTRL_DD_BL))
++		dev_warn(dev, "backlight-on command not sent\n");
++
++	bd = devm_backlight_device_register(dev, "panel", dev, b, &sc8830_bl_ops, &props);
++	if (IS_ERR(bd))
++		return PTR_ERR(bd);
++	return backlight_update_status(bd);
++}
++
++static const struct of_device_id sc8830_bl_of_match[] = {
++	{ .compatible = "sprd,sc8830-dsi-backlight" },
++	{ }
++};
++MODULE_DEVICE_TABLE(of, sc8830_bl_of_match);
++
++static struct platform_driver sc8830_bl_driver = {
++	.probe = sc8830_bl_probe,
++	.driver = {
++		.name = "sc8830-dsi-backlight",
++		.of_match_table = sc8830_bl_of_match,
++	},
++};
++module_platform_driver(sc8830_bl_driver);
++
++MODULE_DESCRIPTION("SM-T280 panel backlight through DSI DCS commands");
++MODULE_LICENSE("GPL");
+-- 
+2.56.0
+

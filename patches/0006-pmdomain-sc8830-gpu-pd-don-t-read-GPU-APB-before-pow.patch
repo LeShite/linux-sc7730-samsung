@@ -1,0 +1,33 @@
+From 51f17d296ad5f573774392af641ace3dedb69565 Mon Sep 17 00:00:00 2001
+From: gtex-port <igomezv0921@gmail.com>
+Date: Sat, 24 Oct 2026 17:32:29 -0600
+Subject: [PATCH 06/11] pmdomain: sc8830-gpu-pd: don't read GPU APB before
+ power-up (v10)
+
+---
+ drivers/pmdomain/sprd/sc8830-gpu-pd.c | 9 ++++++---
+ 1 file changed, 6 insertions(+), 3 deletions(-)
+
+diff --git a/drivers/pmdomain/sprd/sc8830-gpu-pd.c b/drivers/pmdomain/sprd/sc8830-gpu-pd.c
+index 4804c28e3..543bf99ed 100644
+--- a/drivers/pmdomain/sprd/sc8830-gpu-pd.c
++++ b/drivers/pmdomain/sprd/sc8830-gpu-pd.c
+@@ -81,9 +81,12 @@ static int sc8830_gpu_pd_probe(struct platform_device *pdev)
+ 	if (IS_ERR(pd->pmu) || IS_ERR(pd->aon) || IS_ERR(pd->gpu))
+ 		return -EINVAL;
+ 
+-	dev_info(&pdev->dev, "before: pd_cfg %08x eb0 %08x clk %08x rst %08x\n",
+-		 readl(pd->pmu), readl(pd->aon),
+-		 readl(pd->gpu + SC8830_GPU_APB_CLK_CTRL), readl(pd->gpu));
++	/*
++	 * Only the always-on PMU and AON registers here: the GPU APB block
++	 * sits inside the domain and must not be touched while it is off.
++	 */
++	dev_info(&pdev->dev, "before: pd_cfg %08x eb0 %08x\n",
++		 readl(pd->pmu), readl(pd->aon));
+ 
+ 	pd->genpd.name = "gpu";
+ 	pd->genpd.power_on = sc8830_gpu_pd_power_on;
+-- 
+2.56.0
+

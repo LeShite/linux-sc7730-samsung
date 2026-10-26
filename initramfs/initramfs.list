@@ -1,0 +1,6 @@
+# gen_init_cpio list for the built-in bring-up initramfs
+dir /dev 0755 0 0
+nod /dev/console 0600 0 0 c 5 1
+dir /proc 0755 0 0
+dir /sys 0755 0 0
+file /init /home/nigga/batocera-t280/build/initramfs/init 0755 0 0

@@ -1,0 +1,308 @@
+From 2eed52f1d46e37a3bb4412c700b1486e00a4a1f5 Mon Sep 17 00:00:00 2001
+From: gtex-port <igomezv0921@gmail.com>
+Date: Sat, 24 Oct 2026 16:37:46 -0600
+Subject: [PATCH 03/11] mmc: sdhci: add SC8830 sdhost 3.0 glue; enable eMMC
+ (v6)
+
+---
+ .../dts/unisoc/sc7730-samsung-gtexswifi.dts   |  15 ++
+ arch/arm/boot/dts/unisoc/sc7730.dtsi          |  18 ++
+ arch/arm/configs/gtexswifi.config             |  13 +-
+ drivers/mmc/host/Kconfig                      |   8 +
+ drivers/mmc/host/Makefile                     |   1 +
+ drivers/mmc/host/sdhci-sprd-sc8830.c          | 169 ++++++++++++++++++
+ 6 files changed, 223 insertions(+), 1 deletion(-)
+ create mode 100644 drivers/mmc/host/sdhci-sprd-sc8830.c
+
+diff --git a/arch/arm/boot/dts/unisoc/sc7730-samsung-gtexswifi.dts b/arch/arm/boot/dts/unisoc/sc7730-samsung-gtexswifi.dts
+index bbf9c3a41..cea1c0a49 100644
+--- a/arch/arm/boot/dts/unisoc/sc7730-samsung-gtexswifi.dts
++++ b/arch/arm/boot/dts/unisoc/sc7730-samsung-gtexswifi.dts
+@@ -34,6 +34,11 @@ framebuffer@9ea48000 {
+ 		};
+ 	};
+ 
++	aliases {
++		mmc0 = &emmc;
++		mmc1 = &sdc;
++	};
++
+ 	memory@80000000 {
+ 		device_type = "memory";
+ 		reg = <0x80000000 0x60000000>;
+@@ -80,3 +85,13 @@ ramoops@9f600000 {
+ 		};
+ 	};
+ };
++
++&emmc {
++	bus-width = <8>;
++	non-removable;
++	no-sd;
++	no-sdio;
++	cap-mmc-highspeed;
++	max-frequency = <52000000>;
++	status = "okay";
++};
+diff --git a/arch/arm/boot/dts/unisoc/sc7730.dtsi b/arch/arm/boot/dts/unisoc/sc7730.dtsi
+index f7c0777b2..37645e356 100644
+--- a/arch/arm/boot/dts/unisoc/sc7730.dtsi
++++ b/arch/arm/boot/dts/unisoc/sc7730.dtsi
+@@ -91,6 +91,24 @@ timer@40050000 {
+ 			clocks = <&clk32k>;
+ 		};
+ 
++		/* SD card slot (vendor "sdio0") */
++		sdc: mmc@20300000 {
++			compatible = "sprd,sc8830-sdhci";
++			reg = <0x20300000 0x1000>;
++			interrupts = <GIC_SPI 57 IRQ_TYPE_LEVEL_HIGH>;
++			sprd,delays = <0x3 0x3 0x3>;
++			status = "disabled";
++		};
++
++		/* eMMC (vendor "sdio3"), set up by the bootloader */
++		emmc: mmc@20600000 {
++			compatible = "sprd,sc8830-sdhci";
++			reg = <0x20600000 0x1000>;
++			interrupts = <GIC_SPI 60 IRQ_TYPE_LEVEL_HIGH>;
++			sprd,delays = <0xa 0x2 0x2>;
++			status = "disabled";
++		};
++
+ 		gpu: gpu@60000000 {
+ 			compatible = "arm,mali-400";
+ 			reg = <0x60000000 0x10000>;
+diff --git a/arch/arm/configs/gtexswifi.config b/arch/arm/configs/gtexswifi.config
+index 51df457fa..55fdc08a7 100644
+--- a/arch/arm/configs/gtexswifi.config
++++ b/arch/arm/configs/gtexswifi.config
+@@ -56,7 +56,18 @@ CONFIG_DRM_PANIC_SCREEN="kmsg"
+ # Built-in bring-up initramfs with our own tiny /init
+ CONFIG_INITRAMFS_SOURCE="/home/nigga/batocera-t280/initramfs/initramfs.list"
+ 
+-# Crash log kept in RAM, read back from TWRP via /dev/mem
++# Storage: eMMC (and later the SD slot)
++CONFIG_MMC=y
++CONFIG_MMC_BLOCK=y
++CONFIG_MMC_BLOCK_MINORS=32
++CONFIG_MMC_SDHCI=y
++CONFIG_MMC_SDHCI_PLTFM=y
++CONFIG_MMC_SDHCI_SPRD_SC8830=y
++CONFIG_PARTITION_ADVANCED=y
++CONFIG_EFI_PARTITION=y
++CONFIG_MSDOS_PARTITION=y
++
++# Crash log kept in RAM, read back by the next boot of this kernel
+ CONFIG_MISC_FILESYSTEMS=y
+ CONFIG_PSTORE=y
+ CONFIG_PSTORE_CONSOLE=y
+diff --git a/drivers/mmc/host/Kconfig b/drivers/mmc/host/Kconfig
+index c94ae4794..475e431cc 100644
+--- a/drivers/mmc/host/Kconfig
++++ b/drivers/mmc/host/Kconfig
+@@ -699,6 +699,14 @@ config MMC_SDHCI_SPRD
+ 
+ 	  If unsure, say N.
+ 
++config MMC_SDHCI_SPRD_SC8830
++	tristate "Spreadtrum SC8830 family SD host controller"
++	depends on ARCH_SPRD || COMPILE_TEST
++	depends on MMC_SDHCI_PLTFM
++	help
++	  This selects the "sdhost 3.0" SD/eMMC controller of 32-bit
++	  Spreadtrum SC8830 family SoCs such as the SC7730.
++
+ config MMC_TMIO_CORE
+ 	tristate
+ 
+diff --git a/drivers/mmc/host/Makefile b/drivers/mmc/host/Makefile
+index 5057fea8a..82eb8f5f3 100644
+--- a/drivers/mmc/host/Makefile
++++ b/drivers/mmc/host/Makefile
+@@ -101,6 +101,7 @@ obj-$(CONFIG_MMC_SDHCI_MICROCHIP_PIC32)	+= sdhci-pic32.o
+ obj-$(CONFIG_MMC_SDHCI_BRCMSTB)		+= sdhci-brcmstb.o
+ obj-$(CONFIG_MMC_SDHCI_OMAP)		+= sdhci-omap.o
+ obj-$(CONFIG_MMC_SDHCI_SPRD)		+= sdhci-sprd.o
++obj-$(CONFIG_MMC_SDHCI_SPRD_SC8830)	+= sdhci-sprd-sc8830.o
+ obj-$(CONFIG_MMC_SUNPLUS)		+= sunplus-mmc.o
+ obj-$(CONFIG_MMC_CQHCI)			+= cqhci.o
+ cqhci-y					+= cqhci-core.o
+diff --git a/drivers/mmc/host/sdhci-sprd-sc8830.c b/drivers/mmc/host/sdhci-sprd-sc8830.c
+new file mode 100644
+index 000000000..9d99e4feb
+--- /dev/null
++++ b/drivers/mmc/host/sdhci-sprd-sc8830.c
+@@ -0,0 +1,169 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * SDHCI glue for the Spreadtrum SC8830 family (SC7730, ...) "sdhost 3.0"
++ *
++ * Mostly a standard SDHCI 3.0 register file. The differences, taken from
++ * the vendor 3.10 driver (drivers/mmc/host/sdhost.c):
++ *  - no usable capability registers: they are supplied here instead;
++ *  - SDCLK = base / (2 * (div + 1)) with a 10-bit divider;
++ *  - bit 3 of the software reset register is a vendor bit that the vendor
++ *    driver always writes as 1 for the eMMC;
++ *  - sample/drive delay registers at 0x80..0x88, lost on a full reset;
++ *  - the power control register is unused: the bootloader powers the
++ *    card, so it is left alone;
++ *  - only SDMA was ever used (ADMA hits a BUG_ON in the vendor driver).
++ */
++
++#include <linux/delay.h>
++#include <linux/iopoll.h>
++#include <linux/module.h>
++#include <linux/of.h>
++#include <linux/platform_device.h>
++
++#include "sdhci-pltfm.h"
++
++#define SC8830_SDHCI_RST_EMMC		BIT(3)
++#define SC8830_SDHCI_WR_DELAY		0x80
++#define SC8830_SDHCI_RD_POS_DELAY	0x84
++#define SC8830_SDHCI_RD_NEG_DELAY	0x88
++
++#define SC8830_SDHCI_BASE_CLK		384000000
++#define SC8830_SDHCI_MAX_DIV		1023
++
++/* 3.0 V VCC (the vendor OCR), SDMA, high speed, 8-bit, 1 MHz timeout clk */
++#define SC8830_SDHCI_CAPS	(SDHCI_CAN_VDD_300 | SDHCI_CAN_DO_SDMA | \
++				 SDHCI_CAN_DO_HISPD | SDHCI_CAN_DO_8BIT | \
++				 SDHCI_TIMEOUT_CLK_UNIT | 1)
++
++struct sc8830_sdhci {
++	u32 delays[3];
++};
++
++static void sc8830_sdhci_reset(struct sdhci_host *host, u8 mask)
++{
++	struct sdhci_pltfm_host *pltfm_host = sdhci_priv(host);
++	struct sc8830_sdhci *priv = sdhci_pltfm_priv(pltfm_host);
++	u8 val;
++
++	sdhci_writeb(host, mask | SC8830_SDHCI_RST_EMMC, SDHCI_SOFTWARE_RESET);
++
++	if (read_poll_timeout_atomic(sdhci_readb, val, !(val & mask), 10,
++				     100000, false, host, SDHCI_SOFTWARE_RESET))
++		dev_err(mmc_dev(host->mmc), "reset 0x%x never completed\n", mask);
++
++	if (mask & SDHCI_RESET_ALL) {
++		host->clock = 0;
++		sdhci_writel(host, priv->delays[0], SC8830_SDHCI_WR_DELAY);
++		sdhci_writel(host, priv->delays[1], SC8830_SDHCI_RD_POS_DELAY);
++		sdhci_writel(host, priv->delays[2], SC8830_SDHCI_RD_NEG_DELAY);
++	}
++}
++
++static void sc8830_sdhci_set_clock(struct sdhci_host *host, unsigned int clock)
++{
++	u32 div;
++
++	host->mmc->actual_clock = 0;
++	sdhci_writew(host, 0, SDHCI_CLOCK_CONTROL);
++	if (!clock)
++		return;
++
++	/* smallest divider that does not overclock the card */
++	div = DIV_ROUND_UP(SC8830_SDHCI_BASE_CLK, 2 * clock);
++	div = div ? div - 1 : 0;
++	div = min_t(u32, div, SC8830_SDHCI_MAX_DIV);
++
++	host->mmc->actual_clock = SC8830_SDHCI_BASE_CLK / (2 * (div + 1));
++	sdhci_enable_clk(host, ((div & 0x300) >> 2) | ((div & 0xff) << 8));
++}
++
++static unsigned int sc8830_sdhci_get_max_clock(struct sdhci_host *host)
++{
++	return SC8830_SDHCI_BASE_CLK;
++}
++
++static unsigned int sc8830_sdhci_get_min_clock(struct sdhci_host *host)
++{
++	return SC8830_SDHCI_BASE_CLK / (2 * (SC8830_SDHCI_MAX_DIV + 1));
++}
++
++/* The bootloader powers the card; the power control register is unused */
++static void sc8830_sdhci_set_power(struct sdhci_host *host, unsigned char mode,
++				   unsigned short vdd)
++{
++}
++
++static const struct sdhci_ops sc8830_sdhci_ops = {
++	.reset			= sc8830_sdhci_reset,
++	.set_clock		= sc8830_sdhci_set_clock,
++	.get_max_clock		= sc8830_sdhci_get_max_clock,
++	.get_min_clock		= sc8830_sdhci_get_min_clock,
++	.set_power		= sc8830_sdhci_set_power,
++	.set_bus_width		= sdhci_set_bus_width,
++	.set_uhs_signaling	= sdhci_set_uhs_signaling,
++};
++
++static const struct sdhci_pltfm_data sc8830_sdhci_pdata = {
++	.ops = &sc8830_sdhci_ops,
++	.quirks = SDHCI_QUIRK_BROKEN_ADMA | SDHCI_QUIRK_BROKEN_TIMEOUT_VAL |
++		  SDHCI_QUIRK_NO_HISPD_BIT | SDHCI_QUIRK_CAP_CLOCK_BASE_BROKEN,
++	.quirks2 = SDHCI_QUIRK2_NO_1_8_V | SDHCI_QUIRK2_BROKEN_HS200 |
++		   SDHCI_QUIRK2_BROKEN_DDR50,
++};
++
++static int sc8830_sdhci_probe(struct platform_device *pdev)
++{
++	const u16 version = SDHCI_SPEC_300 << SDHCI_SPEC_VER_SHIFT;
++	const u32 caps = SC8830_SDHCI_CAPS, caps1 = 0;
++	struct sdhci_pltfm_host *pltfm_host;
++	struct sc8830_sdhci *priv;
++	struct sdhci_host *host;
++	int ret;
++
++	host = sdhci_pltfm_init(pdev, &sc8830_sdhci_pdata, sizeof(*priv));
++	if (IS_ERR(host))
++		return PTR_ERR(host);
++
++	pltfm_host = sdhci_priv(host);
++	priv = sdhci_pltfm_priv(pltfm_host);
++	of_property_read_u32_array(pdev->dev.of_node, "sprd,delays",
++				   priv->delays, ARRAY_SIZE(priv->delays));
++
++	/* What the bootloader left behind, before the first reset */
++	dev_info(&pdev->dev,
++		 "boot state: caps %08x/%08x ver %04x clk %04x hctl %02x pres %08x\n",
++		 sdhci_readl(host, SDHCI_CAPABILITIES),
++		 sdhci_readl(host, SDHCI_CAPABILITIES_1),
++		 sdhci_readw(host, SDHCI_HOST_VERSION),
++		 sdhci_readw(host, SDHCI_CLOCK_CONTROL),
++		 sdhci_readb(host, SDHCI_HOST_CONTROL),
++		 sdhci_readl(host, SDHCI_PRESENT_STATE));
++
++	ret = mmc_of_parse(host->mmc);
++	if (ret)
++		return ret;
++
++	__sdhci_read_caps(host, &version, &caps, &caps1);
++
++	return sdhci_add_host(host);
++}
++
++static const struct of_device_id sc8830_sdhci_of_match[] = {
++	{ .compatible = "sprd,sc8830-sdhci" },
++	{ }
++};
++MODULE_DEVICE_TABLE(of, sc8830_sdhci_of_match);
++
++static struct platform_driver sc8830_sdhci_driver = {
++	.probe = sc8830_sdhci_probe,
++	.remove = sdhci_pltfm_remove,
++	.driver = {
++		.name = "sdhci-sprd-sc8830",
++		.probe_type = PROBE_PREFER_ASYNCHRONOUS,
++		.of_match_table = sc8830_sdhci_of_match,
++	},
++};
++module_platform_driver(sc8830_sdhci_driver);
++
++MODULE_DESCRIPTION("SDHCI glue for Spreadtrum SC8830 family SoCs");
++MODULE_LICENSE("GPL");
+-- 
+2.56.0
+

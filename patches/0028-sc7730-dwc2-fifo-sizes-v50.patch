@@ -1,0 +1,35 @@
+From cdb91ae606c4ce2f9e1dbdbfd2e7ed28fd426bb0 Mon Sep 17 00:00:00 2001
+From: gtex-port <igomezv0921@gmail.com>
+Date: Sun, 25 Oct 2026 19:24:15 -0600
+Subject: [PATCH] ARM: dts: sc7730: dwc2 FIFO sizes of the vendor (v50)
+
+dwc2 rejected its default FIFO sizes (2048/1024/...) against this core's 3598
+SPRAM entries and then found no TX FIFO for g_ether's endpoint: the host's
+cdc_ether probe got a stall (-32). Use the vendor dwc_otg values for SCX35.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ arch/arm/boot/dts/unisoc/sc7730.dtsi | 7 +++++++
+ 1 file changed, 7 insertions(+)
+
+diff --git a/arch/arm/boot/dts/unisoc/sc7730.dtsi b/arch/arm/boot/dts/unisoc/sc7730.dtsi
+index e77ce3868..5aeddfe52 100644
+--- a/arch/arm/boot/dts/unisoc/sc7730.dtsi
++++ b/arch/arm/boot/dts/unisoc/sc7730.dtsi
+@@ -191,6 +191,13 @@ usb: usb@20200000 {
+ 			phys = <&usbphy>;
+ 			phy-names = "usb2-phy";
+ 			dr_mode = "peripheral";
++			/*
++			 * FIFOs in 32-bit words, the vendor dwc_otg_driver.c values for SCX35 (3108 of the
++			 * 3598 SPRAM entries); Linux's defaults do not fit and leave no FIFO for an endpoint
++			 */
++			g-rx-fifo-size = <276>;
++			g-np-tx-fifo-size = <16>;
++			g-tx-fifo-size = <64 64 256 256 256 256 256 128 128 128 128 128 128 128 512>;
+ 			status = "disabled";
+ 		};
+ 
+-- 
+2.56.0
+

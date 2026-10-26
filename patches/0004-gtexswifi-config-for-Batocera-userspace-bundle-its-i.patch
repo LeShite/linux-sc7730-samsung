@@ -1,0 +1,79 @@
+From 4d098c89877c208a3536bacf7359f129d3d64bea Mon Sep 17 00:00:00 2001
+From: gtex-port <igomezv0921@gmail.com>
+Date: Sat, 24 Oct 2026 17:06:33 -0600
+Subject: [PATCH 04/11] gtexswifi: config for Batocera userspace, bundle its
+ initrd (v7)
+
+---
+ arch/arm/configs/gtexswifi.config | 41 ++++++++++++++++++++++++++++---
+ 1 file changed, 38 insertions(+), 3 deletions(-)
+
+diff --git a/arch/arm/configs/gtexswifi.config b/arch/arm/configs/gtexswifi.config
+index 55fdc08a7..701a0cdc0 100644
+--- a/arch/arm/configs/gtexswifi.config
++++ b/arch/arm/configs/gtexswifi.config
+@@ -37,7 +37,7 @@ CONFIG_ARM_UNWIND=y
+ # Boot: our DTB is appended to zImage, so SBOOT's copy and cmdline are ignored
+ CONFIG_ARM_APPENDED_DTB=y
+ CONFIG_ARM_ATAG_DTB_COMPAT=y
+-CONFIG_CMDLINE="console=tty0 loglevel=8 ignore_loglevel panic=0 fbcon=nodefer"
++CONFIG_CMDLINE="label=BATOCERA console=tty0 loglevel=7 panic=0 fbcon=nodefer"
+ CONFIG_CMDLINE_FORCE=y
+ 
+ # Display: the panel keeps scanning out the bootloader framebuffer
+@@ -53,8 +53,12 @@ CONFIG_FRAMEBUFFER_CONSOLE=y
+ CONFIG_DRM_PANIC=y
+ CONFIG_DRM_PANIC_SCREEN="kmsg"
+ 
+-# Built-in bring-up initramfs with our own tiny /init
+-CONFIG_INITRAMFS_SOURCE="/home/nigga/batocera-t280/initramfs/initramfs.list"
++# Built-in initramfs: Batocera's own initrd (its /init renamed to
++# /init.batocera) plus our tiny /init, which shows diagnostics and then hands
++# over. Files extracted as a normal user are mapped to root.
++CONFIG_INITRAMFS_SOURCE="/home/nigga/batocera-t280/build/batocera-initrd /home/nigga/batocera-t280/initramfs/initramfs.list"
++CONFIG_INITRAMFS_ROOT_UID=1000
++CONFIG_INITRAMFS_ROOT_GID=1000
+ 
+ # Storage: eMMC (and later the SD slot)
+ CONFIG_MMC=y
+@@ -67,6 +71,37 @@ CONFIG_PARTITION_ADVANCED=y
+ CONFIG_EFI_PARTITION=y
+ CONFIG_MSDOS_PARTITION=y
+ 
++# Batocera: its initramfs mounts LABEL=BATOCERA, loop-mounts the squashfs
++# boot/batocera and puts a tmpfs overlay on top
++CONFIG_BLK_DEV=y
++CONFIG_BLK_DEV_LOOP=y
++CONFIG_EXT4_FS=y
++CONFIG_VFAT_FS=y
++CONFIG_EXFAT_FS=y
++CONFIG_FAT_DEFAULT_IOCHARSET="utf8"
++CONFIG_NLS_CODEPAGE_437=y
++CONFIG_NLS_ISO8859_1=y
++CONFIG_NLS_UTF8=y
++CONFIG_SQUASHFS=y
++CONFIG_SQUASHFS_XZ=y
++CONFIG_SQUASHFS_ZSTD=y
++CONFIG_SQUASHFS_LZ4=y
++CONFIG_SQUASHFS_LZO=y
++CONFIG_OVERLAY_FS=y
++CONFIG_TMPFS_XATTR=y
++CONFIG_FUSE_FS=y
++CONFIG_INOTIFY_USER=y
++# udev, dbus and friends
++CONFIG_NET=y
++CONFIG_UNIX=y
++CONFIG_INET=y
++CONFIG_PACKET=y
++# input: evdev for EmulationStation, uinput for Batocera's pad mapper
++CONFIG_INPUT_EVDEV=y
++CONFIG_INPUT_JOYDEV=y
++CONFIG_INPUT_MISC=y
++CONFIG_INPUT_UINPUT=y
++
+ # Crash log kept in RAM, read back by the next boot of this kernel
+ CONFIG_MISC_FILESYSTEMS=y
+ CONFIG_PSTORE=y
+-- 
+2.56.0
+

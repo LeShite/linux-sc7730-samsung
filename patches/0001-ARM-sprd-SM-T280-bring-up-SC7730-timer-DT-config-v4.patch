@@ -1,0 +1,589 @@
+From 376ffc5c53e8609c7ccb328e0dfe87f6b05f04f3 Mon Sep 17 00:00:00 2001
+From: gtex-port <igomezv0921@gmail.com>
+Date: Sat, 24 Oct 2026 16:16:11 -0600
+Subject: [PATCH 01/11] ARM: sprd: SM-T280 bring-up: SC7730 timer, DT, config
+ (v4)
+
+---
+ arch/arm/Kconfig.platforms                    |  10 +
+ arch/arm/boot/dts/unisoc/Makefile             |   2 +
+ .../dts/unisoc/sc7730-samsung-gtexswifi.dts   |  82 ++++++
+ arch/arm/boot/dts/unisoc/sc7730.dtsi          |  91 +++++++
+ arch/arm/configs/gtexswifi.config             |  70 ++++++
+ drivers/clocksource/Kconfig                   |   8 +
+ drivers/clocksource/Makefile                  |   1 +
+ drivers/clocksource/timer-sprd-sc8830.c       | 236 ++++++++++++++++++
+ 8 files changed, 500 insertions(+)
+ create mode 100644 arch/arm/boot/dts/unisoc/sc7730-samsung-gtexswifi.dts
+ create mode 100644 arch/arm/boot/dts/unisoc/sc7730.dtsi
+ create mode 100644 arch/arm/configs/gtexswifi.config
+ create mode 100644 drivers/clocksource/timer-sprd-sc8830.c
+
+diff --git a/arch/arm/Kconfig.platforms b/arch/arm/Kconfig.platforms
+index 5c19c1f2c..61e2c8741 100644
+--- a/arch/arm/Kconfig.platforms
++++ b/arch/arm/Kconfig.platforms
+@@ -163,6 +163,16 @@ config ARCH_RDA
+ 	help
+ 	  This enables support for the RDA Micro 8810PL SoC family.
+ 
++config ARCH_SPRD
++	bool "Spreadtrum (Unisoc) SoCs"
++	depends on ARCH_MULTI_V7
++	select ARM_GIC
++	select SPRD_SC8830_TIMER
++	help
++	  This enables support for 32-bit Spreadtrum SoCs of the SC8830
++	  family, such as the SC7730 used in the Samsung Galaxy Tab A 7.0
++	  (2016).
++
+ menuconfig ARCH_SUNPLUS
+ 	bool "Sunplus SoCs"
+ 	depends on ARCH_MULTI_V7
+diff --git a/arch/arm/boot/dts/unisoc/Makefile b/arch/arm/boot/dts/unisoc/Makefile
+index dba5cd874..f0d0c0b33 100644
+--- a/arch/arm/boot/dts/unisoc/Makefile
++++ b/arch/arm/boot/dts/unisoc/Makefile
+@@ -2,3 +2,5 @@
+ dtb-$(CONFIG_ARCH_RDA) += \
+ 	rda8810pl-orangepi-2g-iot.dtb \
+ 	rda8810pl-orangepi-i96.dtb
++dtb-$(CONFIG_ARCH_SPRD) += \
++	sc7730-samsung-gtexswifi.dtb
+diff --git a/arch/arm/boot/dts/unisoc/sc7730-samsung-gtexswifi.dts b/arch/arm/boot/dts/unisoc/sc7730-samsung-gtexswifi.dts
+new file mode 100644
+index 000000000..bbf9c3a41
+--- /dev/null
++++ b/arch/arm/boot/dts/unisoc/sc7730-samsung-gtexswifi.dts
+@@ -0,0 +1,82 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * Samsung Galaxy Tab A 7.0 (2016) Wi-Fi (SM-T280, gtexswifi)
++ */
++
++/dts-v1/;
++
++#include "sc7730.dtsi"
++
++/ {
++	model = "Samsung Galaxy Tab A 7.0 (2016) Wi-Fi";
++	compatible = "samsung,gtexswifi", "sprd,sc7730";
++	chassis-type = "tablet";
++
++	/* SBOOT picks the DTB out of dt.img by this id and the board revision */
++	sprd,sc-id = <8830 5 0x20000>;
++
++	chosen {
++		#address-cells = <1>;
++		#size-cells = <1>;
++		ranges;
++
++		/* SBOOT writes its own bootargs here; the kernel uses CONFIG_CMDLINE */
++		bootargs = "";
++
++		/* SBOOT leaves the panel running and scanning out lcd_base */
++		framebuffer@9ea48000 {
++			compatible = "simple-framebuffer";
++			reg = <0x9ea48000 (800 * 1280 * 4)>;
++			width = <800>;
++			height = <1280>;
++			stride = <(800 * 4)>;
++			format = "a8r8g8b8";
++		};
++	};
++
++	memory@80000000 {
++		device_type = "memory";
++		reg = <0x80000000 0x60000000>;
++	};
++
++	reserved-memory {
++		#address-cells = <1>;
++		#size-cells = <1>;
++		ranges;
++
++		/* Samsung sec_debug and sec_log buffers */
++		sec-log@86a00000 {
++			reg = <0x86a00000 0x200000>;
++			no-map;
++		};
++
++		/* IPC shared memory and modem images loaded by SBOOT */
++		smem@87800000 {
++			reg = <0x87800000 0x400000>;
++			no-map;
++		};
++
++		modem@88000000 {
++			reg = <0x88000000 0x1d00000>;
++			no-map;
++		};
++
++		/* triple-buffered vendor framebuffer, first buffer is lcd_base */
++		framebuffer@9ea48000 {
++			reg = <0x9ea48000 0xbb8000>;
++			no-map;
++		};
++
++		/*
++		 * Vendor ION carveout. TWRP's kernel never touches it, so a
++		 * log left here can be read back from /dev/mem after a reboot.
++		 */
++		ramoops@9f600000 {
++			compatible = "ramoops";
++			reg = <0x9f600000 0x100000>;
++			record-size = <0x20000>;
++			console-size = <0x80000>;
++			no-map;
++		};
++	};
++};
+diff --git a/arch/arm/boot/dts/unisoc/sc7730.dtsi b/arch/arm/boot/dts/unisoc/sc7730.dtsi
+new file mode 100644
+index 000000000..4eee7ba76
+--- /dev/null
++++ b/arch/arm/boot/dts/unisoc/sc7730.dtsi
+@@ -0,0 +1,91 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * Spreadtrum SC7730 (SC8830 family) SoC
++ *
++ * Addresses and interrupts are taken from the vendor 3.10 kernel
++ * (sprd-scx35_3.dtsi).
++ */
++
++#include <dt-bindings/interrupt-controller/arm-gic.h>
++#include <dt-bindings/interrupt-controller/irq.h>
++
++/ {
++	#address-cells = <1>;
++	#size-cells = <1>;
++	interrupt-parent = <&gic>;
++
++	cpus {
++		#address-cells = <1>;
++		#size-cells = <0>;
++
++		cpu0: cpu@f00 {
++			device_type = "cpu";
++			compatible = "arm,cortex-a7";
++			reg = <0xf00>;
++		};
++
++		cpu1: cpu@f01 {
++			device_type = "cpu";
++			compatible = "arm,cortex-a7";
++			reg = <0xf01>;
++		};
++
++		cpu2: cpu@f02 {
++			device_type = "cpu";
++			compatible = "arm,cortex-a7";
++			reg = <0xf02>;
++		};
++
++		cpu3: cpu@f03 {
++			device_type = "cpu";
++			compatible = "arm,cortex-a7";
++			reg = <0xf03>;
++		};
++	};
++
++	clk32k: clock-32k {
++		compatible = "fixed-clock";
++		#clock-cells = <0>;
++		clock-frequency = <32768>;
++		clock-output-names = "clk32k";
++	};
++
++	soc {
++		compatible = "simple-bus";
++		#address-cells = <1>;
++		#size-cells = <1>;
++		ranges;
++
++		gic: interrupt-controller@12001000 {
++			compatible = "arm,cortex-a7-gic";
++			reg = <0x12001000 0x1000>,
++			      <0x12002000 0x2000>;
++			interrupt-controller;
++			#interrupt-cells = <3>;
++		};
++
++		/* AON GPTIMER0; the second range holds the AON APB clock gates */
++		timer@40050000 {
++			compatible = "sprd,sc8830-timer";
++			reg = <0x40050000 0x1000>,
++			      <0x402e0000 0x8>;
++			interrupts = <GIC_SPI 28 IRQ_TYPE_LEVEL_HIGH>;
++			clocks = <&clk32k>;
++		};
++
++		gpu: gpu@60000000 {
++			compatible = "arm,mali-400";
++			reg = <0x60000000 0x10000>;
++			/* every unit of the MP2 GPU shares one interrupt line */
++			interrupts = <GIC_SPI 39 IRQ_TYPE_LEVEL_HIGH>,
++				     <GIC_SPI 39 IRQ_TYPE_LEVEL_HIGH>,
++				     <GIC_SPI 39 IRQ_TYPE_LEVEL_HIGH>,
++				     <GIC_SPI 39 IRQ_TYPE_LEVEL_HIGH>,
++				     <GIC_SPI 39 IRQ_TYPE_LEVEL_HIGH>,
++				     <GIC_SPI 39 IRQ_TYPE_LEVEL_HIGH>;
++			interrupt-names = "gp", "gpmmu", "pp0", "ppmmu0",
++					  "pp1", "ppmmu1";
++			status = "disabled";
++		};
++	};
++};
+diff --git a/arch/arm/configs/gtexswifi.config b/arch/arm/configs/gtexswifi.config
+new file mode 100644
+index 000000000..51df457fa
+--- /dev/null
++++ b/arch/arm/configs/gtexswifi.config
+@@ -0,0 +1,70 @@
++# Samsung Galaxy Tab A 7.0 (2016) Wi-Fi (SM-T280), stage 1 "first light".
++# Use on top of allnoconfig:
++#   make ARCH=arm allnoconfig KCONFIG_ALLCONFIG=arch/arm/configs/gtexswifi.config
++
++CONFIG_LOCALVERSION="-gtexswifi"
++# CONFIG_LOCALVERSION_AUTO is not set
++CONFIG_DEFAULT_HOSTNAME="gtexswifi"
++CONFIG_SYSVIPC=y
++CONFIG_POSIX_MQUEUE=y
++CONFIG_NO_HZ_IDLE=y
++CONFIG_HIGH_RES_TIMERS=y
++CONFIG_PREEMPT_VOLUNTARY=y
++CONFIG_IKCONFIG=y
++CONFIG_IKCONFIG_PROC=y
++CONFIG_LOG_BUF_SHIFT=18
++CONFIG_PRINTK_TIME=y
++CONFIG_BLK_DEV_INITRD=y
++CONFIG_KERNEL_XZ=y
++CONFIG_KALLSYMS=y
++CONFIG_PANIC_TIMEOUT=0
++# 32-bit time_t syscalls; allnoconfig drops them, older userspace needs them
++CONFIG_COMPAT_32BIT_TIME=y
++
++# Platform (allnoconfig would even turn the MMU off)
++CONFIG_MMU=y
++CONFIG_ARCH_MULTI_V7=y
++CONFIG_ARCH_SPRD=y
++CONFIG_SMP=y
++CONFIG_NR_CPUS=4
++CONFIG_HIGHMEM=y
++CONFIG_VFP=y
++CONFIG_NEON=y
++CONFIG_KERNEL_MODE_NEON=y
++CONFIG_ARM_THUMB=y
++CONFIG_ARM_UNWIND=y
++
++# Boot: our DTB is appended to zImage, so SBOOT's copy and cmdline are ignored
++CONFIG_ARM_APPENDED_DTB=y
++CONFIG_ARM_ATAG_DTB_COMPAT=y
++CONFIG_CMDLINE="console=tty0 loglevel=8 ignore_loglevel panic=0 fbcon=nodefer"
++CONFIG_CMDLINE_FORCE=y
++
++# Display: the panel keeps scanning out the bootloader framebuffer
++CONFIG_DRM=y
++CONFIG_DRM_SIMPLEDRM=y
++CONFIG_DRM_FBDEV_EMULATION=y
++CONFIG_FB=y
++CONFIG_VT=y
++CONFIG_VT_CONSOLE=y
++CONFIG_FRAMEBUFFER_CONSOLE=y
++# fbcon goes through a shadow buffer that a worker copies to the screen;
++# after a panic that worker never runs, so draw panics straight to it
++CONFIG_DRM_PANIC=y
++CONFIG_DRM_PANIC_SCREEN="kmsg"
++
++# Built-in bring-up initramfs with our own tiny /init
++CONFIG_INITRAMFS_SOURCE="/home/nigga/batocera-t280/initramfs/initramfs.list"
++
++# Crash log kept in RAM, read back from TWRP via /dev/mem
++CONFIG_MISC_FILESYSTEMS=y
++CONFIG_PSTORE=y
++CONFIG_PSTORE_CONSOLE=y
++CONFIG_PSTORE_RAM=y
++
++# Userspace basics
++CONFIG_BINFMT_ELF=y
++CONFIG_BINFMT_SCRIPT=y
++CONFIG_DEVTMPFS=y
++CONFIG_DEVTMPFS_MOUNT=y
++CONFIG_TMPFS=y
+diff --git a/drivers/clocksource/Kconfig b/drivers/clocksource/Kconfig
+index 1119fbd52..27cb54474 100644
+--- a/drivers/clocksource/Kconfig
++++ b/drivers/clocksource/Kconfig
+@@ -513,6 +513,14 @@ config SPRD_TIMER
+ 	help
+ 	  Enables support for the Spreadtrum timer driver.
+ 
++config SPRD_SC8830_TIMER
++	bool "Spreadtrum SC8830 family timer driver" if COMPILE_TEST
++	depends on HAS_IOMEM
++	select TIMER_OF
++	help
++	  Enables support for the timers of 32-bit Spreadtrum SC8830 family
++	  SoCs, such as the SC7730.
++
+ config SYS_SUPPORTS_SH_MTU2
+ 	bool
+ 
+diff --git a/drivers/clocksource/Makefile b/drivers/clocksource/Makefile
+index ec4452ee9..f28f72c48 100644
+--- a/drivers/clocksource/Makefile
++++ b/drivers/clocksource/Makefile
+@@ -58,6 +58,7 @@ obj-$(CONFIG_CLKSRC_TI_32K)	+= timer-ti-32k.o
+ obj-$(CONFIG_OWL_TIMER)		+= timer-owl.o
+ obj-$(CONFIG_MILBEAUT_TIMER)	+= timer-milbeaut.o
+ obj-$(CONFIG_SPRD_TIMER)	+= timer-sprd.o
++obj-$(CONFIG_SPRD_SC8830_TIMER)	+= timer-sprd-sc8830.o
+ obj-$(CONFIG_NPCM7XX_TIMER)	+= timer-npcm7xx.o
+ obj-$(CONFIG_RDA_TIMER)		+= timer-rda.o
+ obj-$(CONFIG_REALTEK_OTTO_TIMER)	+= timer-rtl-otto.o
+diff --git a/drivers/clocksource/timer-sprd-sc8830.c b/drivers/clocksource/timer-sprd-sc8830.c
+new file mode 100644
+index 000000000..960208fc2
+--- /dev/null
++++ b/drivers/clocksource/timer-sprd-sc8830.c
+@@ -0,0 +1,236 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * Spreadtrum SC8830 family (SC7730, SC7715, ...) timer driver
++ *
++ * Each timer block holds three 32-bit down counters spaced 0x20 apart.
++ * Timer 0 is used for clockevents and timer 1 as free-running clocksource
++ * and sched_clock. The register layout follows the vendor 3.10 kernel
++ * (drivers/platform/sprd/timer_sc8830.c).
++ */
++
++#include <linux/bitops.h>
++#include <linux/init.h>
++#include <linux/interrupt.h>
++#include <linux/of_address.h>
++#include <linux/sched_clock.h>
++
++#include "timer-of.h"
++
++#define SC8830_TIMER_LOAD(n)	(0x20 * (n) + 0x00)
++#define SC8830_TIMER_CTL(n)	(0x20 * (n) + 0x08)
++#define SC8830_TIMER_INT(n)	(0x20 * (n) + 0x0c)
++#define SC8830_TIMER_CNT_RD(n)	(0x20 * (n) + 0x10)
++
++#define SC8830_TIMER_CTL_PERIOD	BIT(6)
++#define SC8830_TIMER_CTL_ENABLE	BIT(7)
++#define SC8830_TIMER_CTL_NEW	BIT(8)
++
++#define SC8830_TIMER_INT_EN	BIT(0)
++#define SC8830_TIMER_INT_CLR	BIT(3)
++#define SC8830_TIMER_INT_BUSY	BIT(4)
++
++#define SC8830_EVENT_TIMER	0
++#define SC8830_SOURCE_TIMER	1
++#define SC8830_NUM_TIMERS	3
++
++/* AON APB clock gates, the optional second register range */
++#define SC8830_AON_APB_EB0	0x0
++#define SC8830_AON_APB_EB0_TMR	(BIT(10) | BIT(11) | BIT(12))
++
++static void __iomem *sc8830_source_base;
++
++static void sc8830_timer_ctl(void __iomem *base, int n, u32 ctl)
++{
++	writel_relaxed(ctl, base + SC8830_TIMER_CTL(n));
++}
++
++/*
++ * A load is synchronised into the 32k domain, which takes a few 32k cycles.
++ * Wait for the previous one before touching the timer again, and do it while
++ * the timer still runs: once disabled the sync never completes. The vendor
++ * driver orders it the same way. The bound keeps a stuck bit from hanging
++ * the CPU with interrupts off.
++ */
++static void sc8830_timer_wait_load(void __iomem *base, int n)
++{
++	unsigned int spins = 100000;
++
++	while (readl_relaxed(base + SC8830_TIMER_INT(n)) & SC8830_TIMER_INT_BUSY) {
++		if (!--spins) {
++			pr_warn_once("sc8830-timer: load busy bit stuck\n");
++			return;
++		}
++		cpu_relax();
++	}
++}
++
++static int sc8830_timer_set_next_event(unsigned long cycles,
++				       struct clock_event_device *evt)
++{
++	void __iomem *base = timer_of_base(to_timer_of(evt));
++
++	sc8830_timer_wait_load(base, SC8830_EVENT_TIMER);
++	sc8830_timer_ctl(base, SC8830_EVENT_TIMER, 0);
++	writel_relaxed(cycles, base + SC8830_TIMER_LOAD(SC8830_EVENT_TIMER));
++	sc8830_timer_ctl(base, SC8830_EVENT_TIMER, SC8830_TIMER_CTL_ENABLE);
++
++	return 0;
++}
++
++static int sc8830_timer_set_periodic(struct clock_event_device *evt)
++{
++	struct timer_of *to = to_timer_of(evt);
++	void __iomem *base = timer_of_base(to);
++
++	sc8830_timer_ctl(base, SC8830_EVENT_TIMER, SC8830_TIMER_CTL_PERIOD);
++	writel_relaxed(timer_of_period(to),
++		       base + SC8830_TIMER_LOAD(SC8830_EVENT_TIMER));
++	sc8830_timer_ctl(base, SC8830_EVENT_TIMER,
++			 SC8830_TIMER_CTL_ENABLE | SC8830_TIMER_CTL_PERIOD);
++	writel_relaxed(SC8830_TIMER_INT_EN,
++		       base + SC8830_TIMER_INT(SC8830_EVENT_TIMER));
++
++	return 0;
++}
++
++static int sc8830_timer_set_oneshot(struct clock_event_device *evt)
++{
++	struct timer_of *to = to_timer_of(evt);
++	void __iomem *base = timer_of_base(to);
++
++	/* Like the vendor driver, keep it running until the first event */
++	writel_relaxed(timer_of_period(to),
++		       base + SC8830_TIMER_LOAD(SC8830_EVENT_TIMER));
++	sc8830_timer_ctl(base, SC8830_EVENT_TIMER, SC8830_TIMER_CTL_ENABLE);
++	writel_relaxed(SC8830_TIMER_INT_EN,
++		       base + SC8830_TIMER_INT(SC8830_EVENT_TIMER));
++
++	return 0;
++}
++
++static int sc8830_timer_shutdown(struct clock_event_device *evt)
++{
++	void __iomem *base = timer_of_base(to_timer_of(evt));
++
++	/* Writing only the clear bit also masks the interrupt */
++	writel_relaxed(SC8830_TIMER_INT_CLR,
++		       base + SC8830_TIMER_INT(SC8830_EVENT_TIMER));
++	sc8830_timer_ctl(base, SC8830_EVENT_TIMER,
++			 readl_relaxed(base + SC8830_TIMER_CTL(SC8830_EVENT_TIMER)) &
++			 SC8830_TIMER_CTL_PERIOD);
++
++	return 0;
++}
++
++static irqreturn_t sc8830_timer_interrupt(int irq, void *dev_id)
++{
++	struct clock_event_device *evt = dev_id;
++	void __iomem *base = timer_of_base(to_timer_of(evt));
++	u32 val;
++
++	val = readl_relaxed(base + SC8830_TIMER_INT(SC8830_EVENT_TIMER));
++	writel_relaxed(val | SC8830_TIMER_INT_CLR,
++		       base + SC8830_TIMER_INT(SC8830_EVENT_TIMER));
++
++	if (evt->event_handler)
++		evt->event_handler(evt);
++
++	return IRQ_HANDLED;
++}
++
++static struct timer_of sc8830_timer_of = {
++	.flags = TIMER_OF_IRQ | TIMER_OF_BASE | TIMER_OF_CLOCK,
++
++	.clkevt = {
++		.name = "sc8830-timer",
++		.rating = 300,
++		.features = CLOCK_EVT_FEAT_PERIODIC | CLOCK_EVT_FEAT_ONESHOT,
++		.set_next_event = sc8830_timer_set_next_event,
++		.set_state_periodic = sc8830_timer_set_periodic,
++		.set_state_oneshot = sc8830_timer_set_oneshot,
++		.set_state_shutdown = sc8830_timer_shutdown,
++	},
++
++	.of_irq = {
++		.handler = sc8830_timer_interrupt,
++		.flags = IRQF_TIMER | IRQF_IRQPOLL,
++	},
++};
++
++/* The counters run down, so invert them for a monotonic up-count */
++static u64 notrace sc8830_timer_read_count(void)
++{
++	return ~readl_relaxed(sc8830_source_base +
++			      SC8830_TIMER_CNT_RD(SC8830_SOURCE_TIMER));
++}
++
++static u64 sc8830_clocksource_read(struct clocksource *cs)
++{
++	return sc8830_timer_read_count();
++}
++
++static struct clocksource sc8830_clocksource = {
++	.name = "sc8830-timer",
++	.rating = 300,
++	.read = sc8830_clocksource_read,
++	.mask = CLOCKSOURCE_MASK(32),
++	.flags = CLOCK_SOURCE_IS_CONTINUOUS,
++};
++
++static void __init sc8830_timer_enable_gates(struct device_node *np)
++{
++	void __iomem *eb = of_iomap(np, 1);
++
++	if (!eb)
++		return;
++
++	writel_relaxed(readl_relaxed(eb + SC8830_AON_APB_EB0) |
++		       SC8830_AON_APB_EB0_TMR, eb + SC8830_AON_APB_EB0);
++	iounmap(eb);
++}
++
++static int __init sc8830_timer_init(struct device_node *np)
++{
++	struct timer_of *to = &sc8830_timer_of;
++	void __iomem *base;
++	unsigned long rate;
++	int n, ret;
++
++	sc8830_timer_enable_gates(np);
++
++	ret = timer_of_init(np, to);
++	if (ret)
++		return ret;
++
++	base = timer_of_base(to);
++	rate = timer_of_rate(to);
++
++	/* The bootloader may leave timers running; start from a clean state */
++	for (n = 0; n < SC8830_NUM_TIMERS; n++) {
++		sc8830_timer_ctl(base, n, 0);
++		writel_relaxed(SC8830_TIMER_INT_CLR, base + SC8830_TIMER_INT(n));
++	}
++
++	writel_relaxed(0, base + SC8830_TIMER_INT(SC8830_SOURCE_TIMER));
++	sc8830_timer_ctl(base, SC8830_SOURCE_TIMER,
++			 SC8830_TIMER_CTL_NEW | SC8830_TIMER_CTL_PERIOD);
++	writel_relaxed(U32_MAX, base + SC8830_TIMER_LOAD(SC8830_SOURCE_TIMER));
++	sc8830_timer_ctl(base, SC8830_SOURCE_TIMER, SC8830_TIMER_CTL_ENABLE |
++			 SC8830_TIMER_CTL_NEW | SC8830_TIMER_CTL_PERIOD);
++
++	sc8830_source_base = base;
++	sched_clock_register(sc8830_timer_read_count, 32, rate);
++	clocksource_register_hz(&sc8830_clocksource, rate);
++
++	/*
++	 * Register as the boot CPU's local tick device. With a wider cpumask
++	 * the per-CPU dummy_timer is preferred and this timer is demoted to
++	 * broadcast duty, which rules out oneshot mode and hrtimers.
++	 */
++	to->clkevt.cpumask = cpumask_of(0);
++	clockevents_config_and_register(&to->clkevt, rate, 2, 0xf0000000);
++
++	return 0;
++}
++
++TIMER_OF_DECLARE(sc8830, "sprd,sc8830-timer", sc8830_timer_init);
+-- 
+2.56.0
+

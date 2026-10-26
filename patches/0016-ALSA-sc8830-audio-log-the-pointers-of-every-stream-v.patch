@@ -1,0 +1,54 @@
+From abfbec408e72305713444c39966e313127db7487 Mon Sep 17 00:00:00 2001
+From: gtex-port <igomezv0921@gmail.com>
+Date: Sun, 25 Oct 2026 08:18:41 -0600
+Subject: [PATCH] ALSA: sc8830-audio: log the pointers of every stream (v37)
+
+Bring-up aid: each stop prints the state, the periods elapsed and the
+hardware and application pointers, and the first six periods of a stream
+(and one in 500) are logged too. On the tablet it shows the period
+interrupt arriving every 23.2 ms exactly with no lost period, and appl
+fixed at 0: ALSA's default device on this image is plug -> dmix -> hw:0,0,
+whose slave runs free and never moves the application pointer.
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ sound/arm/sc8830-audio.c | 16 ++++++++++------
+ 1 file changed, 10 insertions(+), 6 deletions(-)
+
+diff --git a/sound/arm/sc8830-audio.c b/sound/arm/sc8830-audio.c
+index 105179bbd..8b8d4993c 100644
+--- a/sound/arm/sc8830-audio.c
++++ b/sound/arm/sc8830-audio.c
+@@ -554,6 +554,12 @@ static irqreturn_t sc8830_dma_irq(int irq, void *data)
+ 
+ 	if ((sts & BIT(DMA_CH_LEFT)) && sa->substream) {
+ 		sa->irqs++;
++		if (sa->irqs <= 6 || sa->irqs % 500 == 0) {
++			struct snd_pcm_runtime *rt = sa->substream->runtime;
++
++			dev_info_ratelimited(sa->dev, "period %u: hw=%lu appl=%lu\n", sa->irqs,
++					     (unsigned long)rt->status->hw_ptr, (unsigned long)rt->control->appl_ptr);
++		}
+ 		snd_pcm_period_elapsed(sa->substream);
+ 	}
+ 	return IRQ_HANDLED;
+@@ -710,12 +716,10 @@ static int sc8830_pcm_trigger(struct snd_pcm_substream *substream, int cmd)
+ 		{
+ 			struct snd_pcm_runtime *rt = substream->runtime;
+ 
+-			/* an xrun stops the stream from here: tell the two pointers apart from a normal stop */
+-			if (rt->status->state == SNDRV_PCM_STATE_RUNNING)
+-				dev_info_ratelimited(sa->dev, "stop while running (xrun?): hw=%lu appl=%lu buffer=%lu period=%lu\n",
+-						     (unsigned long)rt->status->hw_ptr,
+-						     (unsigned long)rt->control->appl_ptr,
+-						     rt->buffer_size, rt->period_size);
++			/* bring-up aid: did this stream ever carry data? (appl moves only if it was written) */
++			dev_info_ratelimited(sa->dev, "stop: state=%d periods=%u hw=%lu appl=%lu buffer=%lu period=%lu\n",
++					     rt->status->state, sa->irqs, (unsigned long)rt->status->hw_ptr,
++					     (unsigned long)rt->control->appl_ptr, rt->buffer_size, rt->period_size);
+ 		}
+ 		upd(sa->vbc, VBDABUFFDTA, VBENABLE | VBDA0DMA_EN | VBDA1DMA_EN, 0);
+ 		upd(sa->vbc, VBCHNEN, VBDA0_EN | VBDA1_EN, 0);
+-- 
+2.56.0
+

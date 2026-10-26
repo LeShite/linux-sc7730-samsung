@@ -1,0 +1,551 @@
+From 8595379d7cc0fcf2416256c612cf084aae6b0c90 Mon Sep 17 00:00:00 2001
+From: gtex-port <igomezv0921@gmail.com>
+Date: Sun, 25 Oct 2026 00:45:13 -0600
+Subject: [PATCH 13/13] misc: sc8830-audio-test: speaker test tone without ALSA
+ or DMA (v17)
+
+Drives the VBC ping-pong buffers, the SC2723S codec and its internal
+speaker PA by hand, with the vendor register sequence: a 300 Hz tone for
+6 s a few seconds after boot. It plays: the clocks, LDOs, DAC and PA path
+work.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ arch/arm/boot/dts/unisoc/sc7730.dtsi |   9 +
+ arch/arm/configs/gtexswifi.config    |   2 +
+ drivers/misc/Kconfig                 |   9 +
+ drivers/misc/Makefile                |   1 +
+ drivers/misc/sc8830-audio-test.c     | 459 +++++++++++++++++++++++++++
+ 5 files changed, 480 insertions(+)
+ create mode 100644 drivers/misc/sc8830-audio-test.c
+
+diff --git a/arch/arm/boot/dts/unisoc/sc7730.dtsi b/arch/arm/boot/dts/unisoc/sc7730.dtsi
+index c85d375a6..fc7c0606f 100644
+--- a/arch/arm/boot/dts/unisoc/sc7730.dtsi
++++ b/arch/arm/boot/dts/unisoc/sc7730.dtsi
+@@ -153,6 +153,15 @@ pmic: pmic@40030000 {
+ 			reg-names = "adi", "pmic";
+ 		};
+ 
++		/* Audio bring-up: test tone through VBC + SC2723S codec + speaker PA */
++		audio-test@40020000 {
++			compatible = "sprd,sc8830-audio-test";
++			reg = <0x40020000 0x3000>, <0x40000000 0x2000>,
++			      <0x402e0000 0x4000>, <0x402b0000 0x1000>,
++			      <0x40030000 0x1000>, <0x40038000 0x1000>;
++			reg-names = "vbc", "codec", "aon", "pmu", "adi", "pmic";
++		};
++
+ 		/* SD card slot (vendor "sdio0") */
+ 		sdc: mmc@20300000 {
+ 			compatible = "sprd,sc8830-sdhci";
+diff --git a/arch/arm/configs/gtexswifi.config b/arch/arm/configs/gtexswifi.config
+index 9bcdd195c..d642c8313 100644
+--- a/arch/arm/configs/gtexswifi.config
++++ b/arch/arm/configs/gtexswifi.config
+@@ -45,6 +45,8 @@ CONFIG_SND_PROC_FS=y
+ CONFIG_SND_DRIVERS=y
+ CONFIG_SND_PCM_TIMER=y
+ CONFIG_SND_DUMMY=y
++# Audio bring-up: 300 Hz test tone at boot (drivers/misc/sc8830-audio-test.c)
++CONFIG_SPRD_SC8830_AUDIO_TEST=y
+ 
+ # Boot: our DTB is appended to zImage, so SBOOT's copy and cmdline are ignored
+ CONFIG_ARM_APPENDED_DTB=y
+diff --git a/drivers/misc/Kconfig b/drivers/misc/Kconfig
+index b9c11f673..c484687ae 100644
+--- a/drivers/misc/Kconfig
++++ b/drivers/misc/Kconfig
+@@ -644,6 +644,15 @@ config MCHP_LAN966X_PCI
+ 	    - lan966x-miim (MDIO_MSCC_MIIM)
+ 	    - lan966x-switch (LAN966X_SWITCH)
+ 
++config SPRD_SC8830_AUDIO_TEST
++	bool "Speaker test tone for the Spreadtrum SC8830 (SC7730) codec"
++	depends on ARCH_SPRD || COMPILE_TEST
++	help
++	  Plays a short 300 Hz tone through the internal speaker amplifier of
++	  the SC2723S PMIC codec a few seconds after boot, driving the VBC and
++	  the codec by hand (no ALSA, no DMA). Audio bring-up aid for the
++	  Galaxy Tab A 7.0 (SM-T280).
++
+ source "drivers/misc/c2port/Kconfig"
+ source "drivers/misc/eeprom/Kconfig"
+ source "drivers/misc/cb710/Kconfig"
+diff --git a/drivers/misc/Makefile b/drivers/misc/Makefile
+index b32a2597d..89c49853d 100644
+--- a/drivers/misc/Makefile
++++ b/drivers/misc/Makefile
+@@ -75,3 +75,4 @@ obj-$(CONFIG_MCHP_LAN966X_PCI)	+= lan966x-pci.o
+ obj-y				+= keba/
+ obj-y				+= amd-sbi/
+ obj-$(CONFIG_MISC_RP1)		+= rp1/
++obj-$(CONFIG_SPRD_SC8830_AUDIO_TEST)	+= sc8830-audio-test.o
+diff --git a/drivers/misc/sc8830-audio-test.c b/drivers/misc/sc8830-audio-test.c
+new file mode 100644
+index 000000000..0c8e45873
+--- /dev/null
++++ b/drivers/misc/sc8830-audio-test.c
+@@ -0,0 +1,459 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * Speaker test tone for the Spreadtrum SC8830 family (SC7730) with the
++ * SC2723S PMIC codec, without ALSA and without DMA: the first step of the
++ * audio bring-up on the Galaxy Tab A 7.0 (SM-T280).
++ *
++ * Path: VBC (voice band controller) DA0/DA1 ping-pong buffers -> codec
++ * digital part (AUD_*) -> ADie digital interface -> DAC -> internal speaker
++ * PA (AOL). Both ping-pong buffers are filled with one period of a sine and
++ * the VBC is started with its DMA requests off, hoping it keeps cycling over
++ * them. Register sequence from the vendor 3.10 kernel:
++ * sound/soc/sprd/{dai/vbc/r2p0,codec/sprd/v4}, include/soc/sprd/
++ * __sprd_audio_sc8830.h and chip_x30g/ register headers.
++ *
++ * Plays 6 s, a few seconds after probe, and logs what it did and what the
++ * hardware reports (whether the VBC buffer counter moves, for instance).
++ */
++
++#include <linux/bitfield.h>
++#include <linux/delay.h>
++#include <linux/io.h>
++#include <linux/iopoll.h>
++#include <linux/module.h>
++#include <linux/of.h>
++#include <linux/platform_device.h>
++#include <linux/workqueue.h>
++
++/* AON APB (0x402e0000) */
++#define AON_APB_EB0		0x0000
++#define  AON_VBC_EB		BIT(19)
++#define  AON_AUD_EB		BIT(18)
++#define  AON_AUDIF_EB		BIT(17)
++#define AON_APB_RST0		0x0008
++#define  AON_VBC_SOFT_RST	BIT(20)
++#define  AON_AUD_SOFT_RST	BIT(19)
++#define  AON_AUDIF_SOFT_RST	BIT(18)
++#define AON_SINDRV_CTRL		0x0018
++#define  AON_SINDRV_ENA		BIT(0)
++#define AON_VBC_CTRL		0x0020	/* who owns VBC and codec: 0 = AP */
++#define  AON_AUDIF_CKG_AUTO_EN	BIT(20)
++#define  AON_VBC_OWNER_MASK	GENMASK(19, 1)
++#define AON_AP_WPROT_EN		0x3040
++#define  AON_WPROT_VBC		BIT(6)
++
++/* PMU APB (0x402b0000) */
++#define PMU_SLEEP_CTRL		0x00cc
++#define  PMU_AP_SLEEP_XTL_ON	BIT(8)
++#define PMU_MEM_PD_CFG0		0x0138
++#define  PMU_MEM_PD_VBC_AUD	GENMASK(5, 2)
++
++/* VBC (0x40020000) */
++#define VBDA0			0x0000
++#define VBDA1			0x0004
++#define VBBUFFSIZE		0x0010
++#define  VBDABUFFERSIZE		GENMASK(15, 8)
++#define VBDABUFFDTA		0x0018
++#define  VBENABLE		BIT(15)
++#define  VBDA1DMA_EN		BIT(14)
++#define  VBDA0DMA_EN		BIT(13)
++#define  RAMSW_EN		BIT(10)
++#define  RAMSW_NUMB		BIT(9)
++#define VBDACNT			0x0020
++#define VBIISSEL		0x003c
++#define  VBIISSEL_DA_LRCK	BIT(14)
++#define  VBIISSEL_DA_PORT	GENMASK(8, 6)
++#define DAHPCTL			0x0048
++#define VBIRQRAW		0x00a8
++#define VBCHNEN			0x00c8
++#define  VBDA0_EN		BIT(0)
++#define  VBDA1_EN		BIT(1)
++#define VBC_FIFO_FRAMES		160
++
++/* Codec digital part (0x40000000) */
++#define AUD_TOP_CTL		0x0000
++#define  DAC_EN_L		BIT(0)
++#define  DAC_EN_R		BIT(2)
++#define AUD_DAC_CTL		0x000c
++#define  DAC_MUTE_EN		BIT(15)
++#define  DAC_RATE		GENMASK(3, 0)
++#define  DAC_RATE_48000		1
++#define AUD_SDM_CTL0		0x0010
++#define AUD_AUD_STS0		0x0020
++#define AUD_DAC_SDM_L		0x0038
++#define AUD_DAC_SDM_H		0x003c
++
++/* PMIC registers, offsets in the ADI window at 0x40038000 */
++#define ANA_AUDIFA		0x0400
++#define ANA_PMU0		0x0600
++#define  PA_SW_EN		BIT(15)
++#define  PA_LDO_EN		BIT(14)
++#define  PA_EN			BIT(13)
++#define  OVP_LDO_EN		BIT(11)
++#define  VB_EN			BIT(9)
++#define  VBO_EN			BIT(8)
++#define ANA_PMU1		0x0604
++#define  BG_EN			BIT(15)
++#define  BG_IBIAS_EN		BIT(14)
++#define  VCM_EN			BIT(13)
++#define  VCM_BUF_EN		BIT(12)
++#define  SEL_VCMI		BIT(11)
++#define  VCMI_FAST_EN		BIT(10)
++#define  LDOVBO_FAST_EN		BIT(0)
++#define ANA_PMU2		0x0608
++#define  VCM_V			GENMASK(15, 13)
++#define ANA_PMU3		0x060c
++#define  PA_AB_I		GENMASK(13, 11)
++#define  PA_LDO_V		GENMASK(10, 8)
++#define ANA_PMU5		0x0614
++#define  PA_OVP_V		GENMASK(15, 13)
++#define ANA_CDC0		0x061c
++#define  DAC_CLK_EN		BIT(11)
++#define  DRV_CLK_EN		BIT(8)
++#define ANA_CDC2		0x0624
++#define  DACL_EN		BIT(15)
++#define  DACR_EN		BIT(14)
++#define  DACDC_RMV_EN		BIT(12)
++#define  AOL_EN			BIT(4)
++#define ANA_CDC4		0x062c
++#define  PA_D_EN		BIT(15)
++#define  PA_DTRI_F		GENMASK(14, 13)
++#define ANA_CDC6		0x0634
++#define  DACL_AOL		BIT(13)
++#define  DACR_AOL		BIT(12)
++#define ANA_CDC10		0x0644
++#define  DACL_G			GENMASK(15, 13)
++#define  DACR_G			GENMASK(12, 10)
++#define ANA_CDC11		0x0648
++#define  AOL_G			GENMASK(15, 12)
++#define ANA_STS0		0x0674
++#define DIG_CFG0		0x068c
++#define  AUDIFA_DACL_EN		BIT(9)
++#define  AUDIFA_DACR_EN		BIT(11)
++#define ANA_GLB_ARM_MODULE_EN	0x0800
++#define  ANA_AUD_EN		BIT(4)
++#define ANA_GLB_ARM_CLK_EN	0x0804
++#define  CLK_AUD_6P5M_EN	BIT(1)
++#define  CLK_AUDIF_EN		BIT(0)
++#define ANA_GLB_RTC_CLK_EN	0x0808
++#define  RTC_AUD_EN		BIT(4)
++#define ANA_GLB_ARM_RST		0x080c
++#define  ANA_AUD_RSTS		GENMASK(11, 9)
++#define ANA_GLB_AUD_SLP_CTRL	0x08a4
++#define ANA_GLB_XTL_WAIT_CTRL	0x08e8
++#define  XTL_EN			BIT(8)
++#define ANA_GLB_AUDIO_CTRL0	0x08fc
++#define  CLK_AUD_6P5M_TX_INV_EN	BIT(1)
++
++/* ADI controller (0x40030000), as in sc2723-regulator.c */
++#define ADI_GSSI_CFG0		0x1c
++#define ADI_RD_CMD		0x24
++#define ADI_RD_DATA		0x28
++#define  ADI_RD_DATA_BUSY	BIT(31)
++#define  ADI_RD_DATA_ADDR	GENMASK(30, 16)
++#define  ADI_RD_DATA_VAL	GENMASK(15, 0)
++#define ADI_FIFO_STS		0x2c
++#define  ADI_FIFO_EMPTY		BIT(10)
++
++#define TONE_DELAY_MS		3000
++#define TONE_LENGTH_MS		6000
++#define SPK_GAIN		10	/* AOL_G, 0-15 */
++
++struct audio_test {
++	struct device *dev;
++	void __iomem *vbc, *codec, *aon, *pmu, *adi, *pmic;
++	phys_addr_t pmic_phys;
++	u32 addr_mask;
++	struct delayed_work start, stop;
++};
++
++/* One period of a 300 Hz sine at 48 kHz, a quarter of full scale */
++static const s16 sine300[VBC_FIFO_FRAMES] = {
++	0, 322, 643, 963, 1282, 1598, 1912, 2224, 2531, 2835, 3135, 3430, 3719,
++	4003, 4280, 4551, 4815, 5072, 5320, 5561, 5793, 6016, 6229, 6433, 6627,
++	6811, 6985, 7147, 7299, 7440, 7568, 7686, 7791, 7884, 7966, 8035, 8091,
++	8135, 8167, 8186, 8192, 8186, 8167, 8135, 8091, 8035, 7966, 7884, 7791,
++	7686, 7568, 7440, 7299, 7147, 6985, 6811, 6627, 6433, 6229, 6016, 5793,
++	5561, 5320, 5072, 4815, 4551, 4280, 4003, 3719, 3430, 3135, 2835, 2531,
++	2224, 1912, 1598, 1282, 963, 643, 322, 0, -322, -643, -963, -1282,
++	-1598, -1912, -2224, -2531, -2835, -3135, -3430, -3719, -4003, -4280,
++	-4551, -4815, -5072, -5320, -5561, -5793, -6016, -6229, -6433, -6627,
++	-6811, -6985, -7147, -7299, -7440, -7568, -7686, -7791, -7884, -7966,
++	-8035, -8091, -8135, -8167, -8186, -8192, -8186, -8167, -8135, -8091,
++	-8035, -7966, -7884, -7791, -7686, -7568, -7440, -7299, -7147, -6985,
++	-6811, -6627, -6433, -6229, -6016, -5793, -5561, -5320, -5072, -4815,
++	-4551, -4280, -4003, -3719, -3430, -3135, -2835, -2531, -2224, -1912,
++	-1598, -1282, -963, -643, -322,
++};
++
++static void upd(void __iomem *base, u32 reg, u32 mask, u32 val)
++{
++	writel((readl(base + reg) & ~mask) | (val & mask), base + reg);
++}
++
++static int adi_read(struct audio_test *at, u32 reg, u16 *val)
++{
++	u32 phys = at->pmic_phys + reg, data;
++	int ret;
++
++	writel(phys, at->adi + ADI_RD_CMD);
++	ret = readl_poll_timeout_atomic(at->adi + ADI_RD_DATA, data,
++					!(data & ADI_RD_DATA_BUSY), 1, 2000);
++	if (ret)
++		return ret;
++	if ((FIELD_GET(ADI_RD_DATA_ADDR, data) & at->addr_mask) !=
++	    (phys & at->addr_mask))
++		return -EIO;
++	*val = FIELD_GET(ADI_RD_DATA_VAL, data);
++	return 0;
++}
++
++static void adi_upd(struct audio_test *at, u32 reg, u16 mask, u16 val)
++{
++	u16 old = 0;
++	u32 sts;
++
++	if (adi_read(at, reg, &old))
++		dev_warn(at->dev, "ADI read 0x%03x failed\n", reg);
++	writel((old & ~mask) | (val & mask), at->pmic + reg);
++	if (readl_poll_timeout_atomic(at->adi + ADI_FIFO_STS, sts,
++				      sts & ADI_FIFO_EMPTY, 1, 1000))
++		dev_warn(at->dev, "ADI write 0x%03x timed out\n", reg);
++}
++
++static u16 adi_get(struct audio_test *at, u32 reg)
++{
++	u16 val = 0xdead;
++
++	adi_read(at, reg, &val);
++	return val;
++}
++
++static void dump(struct audio_test *at, const char *when)
++{
++	dev_info(at->dev, "%s: AON EB0=%08x VBC_CTRL=%08x | VBC DTA=%08x CHNEN=%08x CNT=%08x IRQRAW=%08x\n",
++		 when, readl(at->aon + AON_APB_EB0), readl(at->aon + AON_VBC_CTRL),
++		 readl(at->vbc + VBDABUFFDTA), readl(at->vbc + VBCHNEN),
++		 readl(at->vbc + VBDACNT), readl(at->vbc + VBIRQRAW));
++	dev_info(at->dev, "%s: AUD TOP=%08x DAC=%08x STS0=%08x | PMU0=%04x PMU1=%04x CDC0=%04x CDC2=%04x CDC6=%04x CDC11=%04x DIG0=%04x STS0=%04x MOD=%04x CLK=%04x\n",
++		 when, readl(at->codec + AUD_TOP_CTL), readl(at->codec + AUD_DAC_CTL),
++		 readl(at->codec + AUD_AUD_STS0), adi_get(at, ANA_PMU0),
++		 adi_get(at, ANA_PMU1), adi_get(at, ANA_CDC0), adi_get(at, ANA_CDC2),
++		 adi_get(at, ANA_CDC6), adi_get(at, ANA_CDC11), adi_get(at, DIG_CFG0),
++		 adi_get(at, ANA_STS0), adi_get(at, ANA_GLB_ARM_MODULE_EN),
++		 adi_get(at, ANA_GLB_ARM_CLK_EN));
++}
++
++/* VBC and codec digital part: clocks, ownership (AP, not the modem), resets */
++static void soc_side_on(struct audio_test *at)
++{
++	upd(at->aon, AON_VBC_CTRL, AON_VBC_OWNER_MASK, 0);
++	upd(at->aon, AON_AP_WPROT_EN, AON_WPROT_VBC, 0);
++	upd(at->aon, AON_APB_EB0, AON_VBC_EB | AON_AUD_EB | AON_AUDIF_EB,
++	    AON_VBC_EB | AON_AUD_EB);
++	upd(at->aon, AON_VBC_CTRL, AON_AUDIF_CKG_AUTO_EN, AON_AUDIF_CKG_AUTO_EN);
++	upd(at->aon, AON_SINDRV_CTRL, AON_SINDRV_ENA, AON_SINDRV_ENA);
++
++	upd(at->aon, AON_APB_RST0, AON_VBC_SOFT_RST | AON_AUD_SOFT_RST |
++	    AON_AUDIF_SOFT_RST, ~0u);
++	udelay(10);
++	upd(at->aon, AON_APB_RST0, AON_VBC_SOFT_RST | AON_AUD_SOFT_RST |
++	    AON_AUDIF_SOFT_RST, 0);
++
++	upd(at->pmu, PMU_SLEEP_CTRL, PMU_AP_SLEEP_XTL_ON, PMU_AP_SLEEP_XTL_ON);
++	upd(at->pmu, PMU_MEM_PD_CFG0, PMU_MEM_PD_VBC_AUD, 0);
++}
++
++/* PMIC side: audio block, its clocks, then the LDO chain VB > BG > VCOM > VBO */
++static void analog_on(struct audio_test *at)
++{
++	adi_upd(at, ANA_GLB_ARM_MODULE_EN, ANA_AUD_EN, ANA_AUD_EN);
++	adi_upd(at, ANA_GLB_AUD_SLP_CTRL, 0xffff, 0);
++	adi_upd(at, ANA_GLB_ARM_RST, ANA_AUD_RSTS, ANA_AUD_RSTS);
++	udelay(10);
++	adi_upd(at, ANA_GLB_ARM_RST, ANA_AUD_RSTS, 0);
++
++	adi_upd(at, ANA_GLB_ARM_CLK_EN, CLK_AUD_6P5M_EN | CLK_AUDIF_EN,
++		CLK_AUD_6P5M_EN | CLK_AUDIF_EN);
++	adi_upd(at, ANA_GLB_AUDIO_CTRL0, CLK_AUD_6P5M_TX_INV_EN,
++		CLK_AUD_6P5M_TX_INV_EN);
++	adi_upd(at, ANA_AUDIFA, BIT(4), 0);	/* SC2723S: no ADSYNC reuse */
++	adi_upd(at, ANA_GLB_RTC_CLK_EN, RTC_AUD_EN, RTC_AUD_EN);
++	adi_upd(at, ANA_GLB_XTL_WAIT_CTRL, XTL_EN, XTL_EN);
++
++	adi_upd(at, ANA_PMU0, VB_EN, VB_EN);
++	adi_upd(at, ANA_PMU1, BG_EN, BG_EN);
++	adi_upd(at, ANA_PMU1, BG_IBIAS_EN, BG_IBIAS_EN);
++	adi_upd(at, ANA_PMU2, VCM_V, FIELD_PREP(VCM_V, 3));	/* battery >= 3.7 V */
++	adi_upd(at, ANA_PMU1, VCM_EN, VCM_EN);
++	adi_upd(at, ANA_PMU1, VCM_BUF_EN, VCM_BUF_EN);
++	adi_upd(at, ANA_PMU0, VBO_EN, VBO_EN);
++	msleep(20);
++
++	/* sprd_codec_analog_open() */
++	adi_upd(at, ANA_PMU1, SEL_VCMI | VCMI_FAST_EN, SEL_VCMI | VCMI_FAST_EN);
++	adi_upd(at, ANA_CDC2, DACDC_RMV_EN, DACDC_RMV_EN);
++	adi_upd(at, ANA_PMU1, LDOVBO_FAST_EN, LDOVBO_FAST_EN);
++	writel(0x500, at->codec + AUD_SDM_CTL0);
++	writel(0x100, at->codec + AUD_SDM_CTL0);
++}
++
++/* sprd_codec_digital_open(), at 48 kHz */
++static void digital_on(struct audio_test *at)
++{
++	upd(at->codec, AUD_DAC_CTL, DAC_MUTE_EN | DAC_RATE, DAC_RATE_48000);
++	upd(at->codec, AUD_DAC_SDM_L, 0xffff, 0x9999);
++	upd(at->codec, AUD_DAC_SDM_H, 0xff, 0x1);
++}
++
++/* DAPM order of the vendor driver: clocks, DAC switches, mixer into AOL, PA */
++static void speaker_path_on(struct audio_test *at)
++{
++	adi_upd(at, ANA_CDC0, DAC_CLK_EN, DAC_CLK_EN);
++	adi_upd(at, ANA_CDC0, DRV_CLK_EN, DRV_CLK_EN);
++	upd(at->codec, AUD_TOP_CTL, DAC_EN_L | DAC_EN_R, DAC_EN_L | DAC_EN_R);
++	adi_upd(at, DIG_CFG0, AUDIFA_DACL_EN | AUDIFA_DACR_EN,
++		AUDIFA_DACL_EN | AUDIFA_DACR_EN);
++	adi_upd(at, ANA_CDC2, AOL_EN, AOL_EN);
++	adi_upd(at, ANA_PMU0, PA_SW_EN, PA_SW_EN);
++	adi_upd(at, ANA_CDC6, DACL_AOL | DACR_AOL, DACL_AOL | DACR_AOL);
++	adi_upd(at, ANA_CDC2, DACL_EN | DACR_EN, DACL_EN | DACR_EN);
++	adi_upd(at, ANA_CDC10, DACL_G | DACR_G,
++		FIELD_PREP(DACL_G, 7) | FIELD_PREP(DACR_G, 7));	/* 0 dB */
++	adi_upd(at, ANA_CDC11, AOL_G, FIELD_PREP(AOL_G, SPK_GAIN));
++
++	/* sprd_inter_speaker_pa(): class AB, supplied straight from VBAT */
++	adi_upd(at, ANA_PMU3, PA_AB_I | PA_LDO_V,
++		FIELD_PREP(PA_AB_I, 0) | FIELD_PREP(PA_LDO_V, 7));
++	adi_upd(at, ANA_PMU5, PA_OVP_V, FIELD_PREP(PA_OVP_V, 7));
++	adi_upd(at, ANA_PMU0, OVP_LDO_EN, OVP_LDO_EN);
++	adi_upd(at, ANA_CDC4, PA_D_EN | PA_DTRI_F, FIELD_PREP(PA_DTRI_F, 1));
++	msleep(20);
++	adi_upd(at, ANA_PMU0, PA_EN, PA_EN);
++}
++
++static void vbc_fill(struct audio_test *at, int buf)
++{
++	int i;
++
++	upd(at->vbc, VBDABUFFDTA, RAMSW_NUMB, buf ? RAMSW_NUMB : 0);
++	for (i = 0; i < VBC_FIFO_FRAMES; i++) {
++		writel((u16)sine300[i], at->vbc + VBDA0);
++		writel((u16)sine300[i], at->vbc + VBDA1);
++	}
++}
++
++static void vbc_start(struct audio_test *at)
++{
++	upd(at->vbc, VBBUFFSIZE, VBDABUFFERSIZE,
++	    FIELD_PREP(VBDABUFFERSIZE, VBC_FIFO_FRAMES - 1));
++	upd(at->vbc, VBIISSEL, VBIISSEL_DA_PORT | VBIISSEL_DA_LRCK,
++	    VBIISSEL_DA_LRCK);			/* port 0: internal codec */
++	writel(0, at->vbc + DAHPCTL);		/* no EQ, no ALC */
++
++	upd(at->vbc, VBCHNEN, VBDA0_EN | VBDA1_EN, VBDA0_EN | VBDA1_EN);
++	upd(at->vbc, VBDABUFFDTA, RAMSW_EN, RAMSW_EN);
++	vbc_fill(at, 1);
++	vbc_fill(at, 0);
++	upd(at->vbc, VBDABUFFDTA, RAMSW_EN, 0);
++
++	upd(at->vbc, VBDABUFFDTA, VBDA0DMA_EN | VBDA1DMA_EN | VBENABLE, VBENABLE);
++}
++
++static void tone_start(struct work_struct *work)
++{
++	struct audio_test *at = container_of(work, struct audio_test, start.work);
++	u32 cnt0, cnt1;
++
++	dev_info(at->dev, "AUDIO: tono de prueba de 300 Hz por el altavoz durante %d s\n",
++		 TONE_LENGTH_MS / 1000);
++	dump(at, "antes");
++	soc_side_on(at);
++	analog_on(at);
++	digital_on(at);
++	speaker_path_on(at);
++	vbc_start(at);
++	dump(at, "sonando");
++
++	cnt0 = readl(at->vbc + VBDACNT);
++	msleep(50);
++	cnt1 = readl(at->vbc + VBDACNT);
++	dev_info(at->dev, "VBC DA counter %08x -> %08x in 50 ms (%s)\n", cnt0, cnt1,
++		 cnt0 == cnt1 ? "parado" : "se mueve");
++
++	schedule_delayed_work(&at->stop, msecs_to_jiffies(TONE_LENGTH_MS));
++}
++
++static void tone_stop(struct work_struct *work)
++{
++	struct audio_test *at = container_of(work, struct audio_test, stop.work);
++
++	adi_upd(at, ANA_PMU0, PA_EN, 0);
++	msleep(2);
++	adi_upd(at, ANA_PMU0, PA_SW_EN, 0);
++	upd(at->vbc, VBDABUFFDTA, VBENABLE, 0);
++	dump(at, "fin");
++	dev_info(at->dev, "AUDIO: fin del tono\n");
++}
++
++static void __iomem *map(struct platform_device *pdev, const char *name,
++			 phys_addr_t *phys)
++{
++	struct resource *res;
++
++	res = platform_get_resource_byname(pdev, IORESOURCE_MEM, name);
++	if (!res)
++		return IOMEM_ERR_PTR(-EINVAL);
++	if (phys)
++		*phys = res->start;
++	/* not exclusive: the PMIC, timer and GPU drivers map some of these too */
++	return devm_ioremap(&pdev->dev, res->start, resource_size(res)) ?:
++	       IOMEM_ERR_PTR(-ENOMEM);
++}
++
++static int audio_test_probe(struct platform_device *pdev)
++{
++	struct audio_test *at;
++	u32 cfg0, bits;
++
++	at = devm_kzalloc(&pdev->dev, sizeof(*at), GFP_KERNEL);
++	if (!at)
++		return -ENOMEM;
++	at->dev = &pdev->dev;
++
++	at->vbc = map(pdev, "vbc", NULL);
++	at->codec = map(pdev, "codec", NULL);
++	at->aon = map(pdev, "aon", NULL);
++	at->pmu = map(pdev, "pmu", NULL);
++	at->adi = map(pdev, "adi", NULL);
++	at->pmic = map(pdev, "pmic", &at->pmic_phys);
++	if (IS_ERR(at->vbc) || IS_ERR(at->codec) || IS_ERR(at->aon) ||
++	    IS_ERR(at->pmu) || IS_ERR(at->adi) || IS_ERR(at->pmic))
++		return -ENOMEM;
++
++	cfg0 = readl(at->adi + ADI_GSSI_CFG0);
++	bits = (cfg0 & 0x3f) - ((cfg0 >> 11) & 0x1f) - 1;
++	if (bits > 13)
++		bits = 9;
++	at->addr_mask = GENMASK(bits + 1, 0);
++
++	INIT_DELAYED_WORK(&at->start, tone_start);
++	INIT_DELAYED_WORK(&at->stop, tone_stop);
++	schedule_delayed_work(&at->start, msecs_to_jiffies(TONE_DELAY_MS));
++	return 0;
++}
++
++static const struct of_device_id audio_test_of_match[] = {
++	{ .compatible = "sprd,sc8830-audio-test" },
++	{ }
++};
++
++static struct platform_driver audio_test_driver = {
++	.probe = audio_test_probe,
++	.driver = {
++		.name = "sc8830-audio-test",
++		.of_match_table = audio_test_of_match,
++		.suppress_bind_attrs = true,
++	},
++};
++builtin_platform_driver(audio_test_driver);
+-- 
+2.56.0
+

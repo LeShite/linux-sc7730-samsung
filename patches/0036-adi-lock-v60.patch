@@ -1,0 +1,525 @@
+From c7704cf2e2d0a9018bfa9547a361447f6eafe535 Mon Sep 17 00:00:00 2001
+From: gtex-port <igomezv0921@gmail.com>
+Date: Mon, 26 Oct 2026 00:52:29 -0600
+Subject: [PATCH] sc8830: one lock for the ADI bus; audio never writes back a
+ failed read; cpuclk thermal brake (v60)
+
+The audio, fuel gauge, regulator, keys and cpuclk drivers each locked only
+themselves while sharing the ADI read command/data pair, so reads got each
+other's data. A failed read made sc8830-audio write PMU0 back as 0x2000 and the
+speaker went silent (also the likely cause of the fuel gauge losing FGU_EN).
+Reads and read-modify-writes now hold sc8830_adi_lock; the audio driver retries
+and leaves the register alone when it cannot read it. cpuclk drops to 1300 MHz
+above 80 C and returns below 68 C.
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ drivers/input/keyboard/sc8830-keys.c |  28 ++++++--
+ drivers/misc/Makefile                |   1 +
+ drivers/misc/sc8830-adi-lock.c       |   6 ++
+ drivers/power/supply/sc2723-fgu.c    |  28 +++++++-
+ drivers/regulator/sc2723-regulator.c |  38 ++++++----
+ drivers/thermal/sc8830-cpuclk.c      | 102 +++++++++++++++++++++------
+ include/linux/sc8830-adi.h           |  15 ++++
+ sound/arm/sc8830-audio.c             |  21 ++++--
+ 8 files changed, 191 insertions(+), 48 deletions(-)
+ create mode 100644 drivers/misc/sc8830-adi-lock.c
+ create mode 100644 include/linux/sc8830-adi.h
+
+diff --git a/drivers/input/keyboard/sc8830-keys.c b/drivers/input/keyboard/sc8830-keys.c
+index 035573a72..232609792 100644
+--- a/drivers/input/keyboard/sc8830-keys.c
++++ b/drivers/input/keyboard/sc8830-keys.c
+@@ -20,6 +20,7 @@
+ #include <linux/module.h>
+ #include <linux/of.h>
+ #include <linux/platform_device.h>
++#include <linux/sc8830-adi.h>
+ #include <linux/workqueue.h>
+ 
+ /* keypad controller (0x40250000) */
+@@ -80,6 +81,7 @@ struct sc8830_keys {
+ 	bool power, voldown;
+ };
+ 
++/* the caller holds sc8830_adi_lock */
+ static int adi_read(struct sc8830_keys *k, u32 reg, u16 *val)
+ {
+ 	u32 phys = k->pmic_phys + reg, data;
+@@ -99,13 +101,27 @@ static int adi_read(struct sc8830_keys *k, u32 reg, u16 *val)
+ /* read-modify-write; the audio driver touches other bits of the same registers under its own lock */
+ static void adi_set(struct sc8830_keys *k, u32 reg, u16 bits)
+ {
++	unsigned long flags;
+ 	u16 old;
+ 	u32 sts;
+ 
+-	if (adi_read(k, reg, &old))
+-		return;
+-	writel(old | bits, k->pmic + reg);
+-	readl_poll_timeout_atomic(k->adi + ADI_FIFO_STS, sts, sts & ADI_FIFO_EMPTY, 1, 1000);
++	raw_spin_lock_irqsave(&sc8830_adi_lock, flags);
++	if (!adi_read(k, reg, &old)) {
++		writel(old | bits, k->pmic + reg);
++		readl_poll_timeout_atomic(k->adi + ADI_FIFO_STS, sts, sts & ADI_FIFO_EMPTY, 1, 1000);
++	}
++	raw_spin_unlock_irqrestore(&sc8830_adi_lock, flags);
++}
++
++static int adi_get(struct sc8830_keys *k, u32 reg, u16 *val)
++{
++	unsigned long flags;
++	int ret;
++
++	raw_spin_lock_irqsave(&sc8830_adi_lock, flags);
++	ret = adi_read(k, reg, val);
++	raw_spin_unlock_irqrestore(&sc8830_adi_lock, flags);
++	return ret;
+ }
+ 
+ static void upd(void __iomem *base, u32 reg, u32 mask, u32 val)
+@@ -137,7 +153,7 @@ static void poll_work(struct work_struct *work)
+ 	u16 eic;
+ 	int i;
+ 
+-	if (!adi_read(k, ANA_EIC_DATA, &eic) && eic == k->eic_last) {
++	if (!adi_get(k, ANA_EIC_DATA, &eic) && eic == k->eic_last) {
+ 		bool power = (eic ^ k->eic_idle) & BIT(EIC_POWER);
+ 		bool voldown = (eic ^ k->eic_idle) & BIT(EIC_VOLDOWN);
+ 
+@@ -213,7 +229,7 @@ static int sc8830_keys_probe(struct platform_device *pdev)
+ 	adi_set(k, ANA_GLB_RTC_CLK_EN, RTC_EIC_EN);
+ 	adi_set(k, ANA_EIC_DMSK, BIT(EIC_POWER) | BIT(EIC_VOLDOWN));
+ 	udelay(100);
+-	ret = adi_read(k, ANA_EIC_DATA, &k->eic_idle);
++	ret = adi_get(k, ANA_EIC_DATA, &k->eic_idle);
+ 	if (ret)
+ 		return dev_err_probe(dev, ret, "cannot read the analog EIC\n");
+ 	/*
+diff --git a/drivers/misc/Makefile b/drivers/misc/Makefile
+index 89c49853d..75d56de2a 100644
+--- a/drivers/misc/Makefile
++++ b/drivers/misc/Makefile
+@@ -76,3 +76,4 @@ obj-y				+= keba/
+ obj-y				+= amd-sbi/
+ obj-$(CONFIG_MISC_RP1)		+= rp1/
+ obj-$(CONFIG_SPRD_SC8830_AUDIO_TEST)	+= sc8830-audio-test.o
++obj-$(CONFIG_ARCH_SPRD)	+= sc8830-adi-lock.o
+diff --git a/drivers/misc/sc8830-adi-lock.c b/drivers/misc/sc8830-adi-lock.c
+new file mode 100644
+index 000000000..23d06874f
+--- /dev/null
++++ b/drivers/misc/sc8830-adi-lock.c
+@@ -0,0 +1,6 @@
++// SPDX-License-Identifier: GPL-2.0
++#include <linux/export.h>
++#include <linux/sc8830-adi.h>
++
++DEFINE_RAW_SPINLOCK(sc8830_adi_lock);
++EXPORT_SYMBOL_GPL(sc8830_adi_lock);
+diff --git a/drivers/power/supply/sc2723-fgu.c b/drivers/power/supply/sc2723-fgu.c
+index 0e7d3dbd6..04a5b7f40 100644
+--- a/drivers/power/supply/sc2723-fgu.c
++++ b/drivers/power/supply/sc2723-fgu.c
+@@ -20,6 +20,7 @@
+ #include <linux/iopoll.h>
+ #include <linux/module.h>
+ #include <linux/mutex.h>
++#include <linux/sc8830-adi.h>
+ #include <linux/of.h>
+ #include <linux/platform_device.h>
+ #include <linux/power_supply.h>
+@@ -85,7 +86,8 @@ struct sc2723_fgu {
+ 	struct delayed_work save;
+ };
+ 
+-static int adi_read(struct sc2723_fgu *f, u32 reg, u16 *val)
++/* the caller holds sc8830_adi_lock */
++static int __adi_read(struct sc2723_fgu *f, u32 reg, u16 *val)
+ {
+ 	u32 phys = f->pmic_phys + reg, data;
+ 	int ret;
+@@ -101,21 +103,41 @@ static int adi_read(struct sc2723_fgu *f, u32 reg, u16 *val)
+ 	return 0;
+ }
+ 
++static int adi_read(struct sc2723_fgu *f, u32 reg, u16 *val)
++{
++	unsigned long flags;
++	int ret;
++
++	raw_spin_lock_irqsave(&sc8830_adi_lock, flags);
++	ret = __adi_read(f, reg, val);
++	raw_spin_unlock_irqrestore(&sc8830_adi_lock, flags);
++	return ret;
++}
++
+ static void adi_write(struct sc2723_fgu *f, u32 reg, u16 val)
+ {
++	unsigned long flags;
+ 	u32 sts;
+ 
++	raw_spin_lock_irqsave(&sc8830_adi_lock, flags);
+ 	writel(val, f->pmic + reg);
+ 	readl_poll_timeout_atomic(f->adi + ADI_FIFO_STS, sts, sts & ADI_FIFO_EMPTY, 1, 1000);
++	raw_spin_unlock_irqrestore(&sc8830_adi_lock, flags);
+ }
+ 
+ /* set or clear only these bits, re-reading the register right before (other drivers share it) */
+ static void adi_bits(struct sc2723_fgu *f, u32 reg, u16 bits, bool on)
+ {
++	unsigned long flags;
+ 	u16 v;
++	u32 sts;
+ 
+-	if (!adi_read(f, reg, &v))
+-		adi_write(f, reg, on ? v | bits : v & ~bits);
++	raw_spin_lock_irqsave(&sc8830_adi_lock, flags);
++	if (!__adi_read(f, reg, &v)) {
++		writel(on ? v | bits : v & ~bits, f->pmic + reg);
++		readl_poll_timeout_atomic(f->adi + ADI_FIFO_STS, sts, sts & ADI_FIFO_EMPTY, 1, 1000);
++	}
++	raw_spin_unlock_irqrestore(&sc8830_adi_lock, flags);
+ }
+ 
+ /*
+diff --git a/drivers/regulator/sc2723-regulator.c b/drivers/regulator/sc2723-regulator.c
+index df9566dae..546164da7 100644
+--- a/drivers/regulator/sc2723-regulator.c
++++ b/drivers/regulator/sc2723-regulator.c
+@@ -29,6 +29,7 @@
+ #include <linux/reboot.h>
+ #include <linux/regulator/driver.h>
+ #include <linux/regulator/of_regulator.h>
++#include <linux/sc8830-adi.h>
+ #include <linux/spinlock.h>
+ #include <linux/string.h>
+ 
+@@ -82,17 +83,15 @@ struct sc2723_ldo {
+ 	u32 trim_reg, trim_mask;
+ };
+ 
+-static int sc2723_read(struct sc2723 *pmic, u32 reg, u16 *val)
++/* the caller holds sc8830_adi_lock */
++static int __sc2723_read(struct sc2723 *pmic, u32 reg, u16 *val)
+ {
+ 	u32 phys = pmic->win_phys + reg, data;
+-	unsigned long flags;
+ 	int ret;
+ 
+-	spin_lock_irqsave(&pmic->lock, flags);
+ 	writel(phys, pmic->adi + ADI_RD_CMD);
+ 	ret = readl_poll_timeout_atomic(pmic->adi + ADI_RD_DATA, data,
+ 					!(data & ADI_RD_DATA_BUSY), 1, 2000);
+-	spin_unlock_irqrestore(&pmic->lock, flags);
+ 
+ 	if (ret)
+ 		return ret;
+@@ -104,6 +103,17 @@ static int sc2723_read(struct sc2723 *pmic, u32 reg, u16 *val)
+ 	return 0;
+ }
+ 
++static int sc2723_read(struct sc2723 *pmic, u32 reg, u16 *val)
++{
++	unsigned long flags;
++	int ret;
++
++	raw_spin_lock_irqsave(&sc8830_adi_lock, flags);
++	ret = __sc2723_read(pmic, reg, val);
++	raw_spin_unlock_irqrestore(&sc8830_adi_lock, flags);
++	return ret;
++}
++
+ static int sc2723_update(struct sc2723 *pmic, u32 reg, u16 mask, u16 val)
+ {
+ 	unsigned long flags;
+@@ -111,25 +121,27 @@ static int sc2723_update(struct sc2723 *pmic, u32 reg, u16 mask, u16 val)
+ 	u32 sts;
+ 	int ret;
+ 
+-	ret = sc2723_read(pmic, reg, &old);
+-	if (ret)
+-		return ret;
+-
+-	spin_lock_irqsave(&pmic->lock, flags);
+-	writel((old & ~mask) | (val & mask), pmic->win + reg);
+-	ret = readl_poll_timeout_atomic(pmic->adi + ADI_FIFO_STS, sts,
+-					sts & ADI_FIFO_EMPTY, 1, 1000);
+-	spin_unlock_irqrestore(&pmic->lock, flags);
++	raw_spin_lock_irqsave(&sc8830_adi_lock, flags);
++	ret = __sc2723_read(pmic, reg, &old);
++	if (!ret) {
++		writel((old & ~mask) | (val & mask), pmic->win + reg);
++		ret = readl_poll_timeout_atomic(pmic->adi + ADI_FIFO_STS, sts,
++						sts & ADI_FIFO_EMPTY, 1, 1000);
++	}
++	raw_spin_unlock_irqrestore(&sc8830_adi_lock, flags);
+ 
+ 	return ret;
+ }
+ 
+ static void sc2723_write(struct sc2723 *pmic, u32 reg, u16 val)
+ {
++	unsigned long flags;
+ 	u32 sts;
+ 
++	raw_spin_lock_irqsave(&sc8830_adi_lock, flags);
+ 	writel(val, pmic->win + reg);
+ 	readl_poll_timeout_atomic(pmic->adi + ADI_FIFO_STS, sts, sts & ADI_FIFO_EMPTY, 1, 1000);
++	raw_spin_unlock_irqrestore(&sc8830_adi_lock, flags);
+ }
+ 
+ /* the vendor's sequence: LDOs off, unlock the power registers, then all LDOs and DC-DCs off */
+diff --git a/drivers/thermal/sc8830-cpuclk.c b/drivers/thermal/sc8830-cpuclk.c
+index e23d908f0..e8afb5d5e 100644
+--- a/drivers/thermal/sc8830-cpuclk.c
++++ b/drivers/thermal/sc8830-cpuclk.c
+@@ -23,8 +23,11 @@
+ #include <linux/kernel.h>
+ #include <linux/module.h>
+ #include <linux/mutex.h>
++#include <linux/sc8830-adi.h>
+ #include <linux/of.h>
+ #include <linux/platform_device.h>
++#include <linux/thermal.h>
++#include <linux/workqueue.h>
+ 
+ #define ADI_GSSI_CFG0		0x1c
+ #define ADI_RD_CMD		0x24
+@@ -55,6 +58,9 @@
+ #define MAX_MHZ			(PLL_REF_MHZ * 57)	/* 1482, tested stable */
+ #define MAX_BOOST_MV		100
+ #define MAX_UV			1200000
++#define THROTTLE_MC		80000		/* above this the clock drops to 1300 MHz... */
++#define RESUME_MC		68000		/* ...and comes back below this */
++#define THERMAL_MS		2000
+ 
+ static const u32 coarse_uv[8] = { 1100000, 700000, 800000, 900000, 1000000, 650000, 1200000, 1300000 };
+ 
+@@ -66,9 +72,13 @@ struct cpuclk {
+ 	struct mutex lock;
+ 	int boot_uv;
+ 	int boost_mv;
++	unsigned int want_mhz;		/* what was asked for; the clock may be held lower while hot */
++	bool throttled;
++	struct delayed_work thermal;
+ };
+ 
+-static int adi_read(struct cpuclk *c, u32 reg, u16 *val)
++/* the caller holds sc8830_adi_lock */
++static int __adi_read(struct cpuclk *c, u32 reg, u16 *val)
+ {
+ 	u32 phys = c->pmic_phys + reg, data;
+ 	int ret;
+@@ -83,16 +93,32 @@ static int adi_read(struct cpuclk *c, u32 reg, u16 *val)
+ 	return 0;
+ }
+ 
++static int adi_read(struct cpuclk *c, u32 reg, u16 *val)
++{
++	unsigned long flags;
++	int ret;
++
++	raw_spin_lock_irqsave(&sc8830_adi_lock, flags);
++	ret = __adi_read(c, reg, val);
++	raw_spin_unlock_irqrestore(&sc8830_adi_lock, flags);
++	return ret;
++}
++
+ static int adi_update(struct cpuclk *c, u32 reg, u16 mask, u16 set)
+ {
++	unsigned long flags;
+ 	u16 v;
+ 	u32 sts;
+-	int ret = adi_read(c, reg, &v);
++	int ret;
+ 
+-	if (ret)
+-		return ret;
+-	writel((v & ~mask) | set, c->pmic + reg);
+-	return readl_poll_timeout_atomic(c->adi + ADI_FIFO_STS, sts, sts & ADI_FIFO_EMPTY, 1, 1000);
++	raw_spin_lock_irqsave(&sc8830_adi_lock, flags);
++	ret = __adi_read(c, reg, &v);
++	if (!ret) {
++		writel((v & ~mask) | set, c->pmic + reg);
++		ret = readl_poll_timeout_atomic(c->adi + ADI_FIFO_STS, sts, sts & ADI_FIFO_EMPTY, 1, 1000);
++	}
++	raw_spin_unlock_irqrestore(&sc8830_adi_lock, flags);
++	return ret;
+ }
+ 
+ static int get_uv(struct cpuclk *c, int *uv, u16 *coarse, u16 *trim)
+@@ -211,21 +237,12 @@ static void set_axi_div(struct cpuclk *c, unsigned int div)
+ 	readl(c->ahb + AP_AHB_CA7_CKG_CFG);
+ }
+ 
+-static ssize_t freq_mhz_store(struct device *dev, struct device_attribute *attr, const char *buf, size_t n)
++/* the caller holds c->lock */
++static int apply_mhz(struct cpuclk *c, unsigned int mhz)
+ {
+-	struct cpuclk *c = dev_get_drvdata(dev);
+-	unsigned int mhz, cur, axi;
+-	int mv, ret = kstrtouint(buf, 0, &mhz);
++	unsigned int cur = get_mhz(c), axi = mhz_to_axi_div(mhz);
++	int mv = mhz_to_boost_mv(mhz), ret = 0;
+ 
+-	if (ret)
+-		return ret;
+-	mhz = mhz / PLL_REF_MHZ * PLL_REF_MHZ;
+-	if (mhz < MIN_MHZ || mhz > MAX_MHZ)
+-		return -EINVAL;
+-	axi = mhz_to_axi_div(mhz);
+-	mv = mhz_to_boost_mv(mhz);
+-	mutex_lock(&c->lock);
+-	cur = get_mhz(c);
+ 	if (mhz > cur) {			/* up: voltage and the slower bus first */
+ 		ret = mv > c->boost_mv ? set_uv(c, c->boot_uv + mv * 1000) : 0;
+ 		if (!ret)
+@@ -241,11 +258,53 @@ static ssize_t freq_mhz_store(struct device *dev, struct device_attribute *attr,
+ 		if (!ret)
+ 			c->boost_mv = mv;
+ 	}
++	return ret;
++}
++
++static ssize_t freq_mhz_store(struct device *dev, struct device_attribute *attr, const char *buf, size_t n)
++{
++	struct cpuclk *c = dev_get_drvdata(dev);
++	unsigned int mhz;
++	int ret = kstrtouint(buf, 0, &mhz);
++
++	if (ret)
++		return ret;
++	mhz = mhz / PLL_REF_MHZ * PLL_REF_MHZ;
++	if (mhz < MIN_MHZ || mhz > MAX_MHZ)
++		return -EINVAL;
++	mutex_lock(&c->lock);
++	c->want_mhz = mhz;
++	ret = c->throttled ? 0 : apply_mhz(c, mhz);	/* hot: it is applied when it cools */
+ 	mutex_unlock(&c->lock);
+-	dev_info(dev, "CPU now %u MHz, +%d mV\n", get_mhz(c), c->boost_mv);
++	dev_info(dev, "CPU asked %u MHz%s, now %u MHz, +%d mV\n", mhz, c->throttled ? " (held back: hot)" : "",
++		 get_mhz(c), c->boost_mv);
+ 	return ret ?: n;
+ }
+ 
++/* CPU sensor of sc8830-thermal: too hot -> 1300 MHz, cooled -> back to what was asked */
++static void thermal_work(struct work_struct *w)
++{
++	struct cpuclk *c = container_of(to_delayed_work(w), struct cpuclk, thermal);
++	struct thermal_zone_device *tz = thermal_zone_get_zone_by_name("cpu_thermal");
++	int temp;
++
++	if (!IS_ERR(tz) && !thermal_zone_get_temp(tz, &temp)) {
++		mutex_lock(&c->lock);
++		if (!c->throttled && temp >= THROTTLE_MC && get_mhz(c) > 1300) {
++			c->throttled = true;
++			apply_mhz(c, 1300);
++			dev_warn(c->dev, "%d mC: held at 1300 MHz\n", temp);
++		} else if (c->throttled && temp <= RESUME_MC) {
++			c->throttled = false;
++			if (c->want_mhz > 1300)
++				apply_mhz(c, c->want_mhz);
++			dev_info(c->dev, "%d mC: back to %u MHz\n", temp, c->want_mhz);
++		}
++		mutex_unlock(&c->lock);
++	}
++	schedule_delayed_work(&c->thermal, msecs_to_jiffies(THERMAL_MS));
++}
++
+ static ssize_t boost_mv_show(struct device *dev, struct device_attribute *attr, char *buf)
+ {
+ 	struct cpuclk *c = dev_get_drvdata(dev);
+@@ -332,6 +391,7 @@ static int cpuclk_probe(struct platform_device *pdev)
+ 		bits = 9;
+ 	c->addr_mask = GENMASK(bits + 1, 0);
+ 	platform_set_drvdata(pdev, c);
++	INIT_DELAYED_WORK(&c->thermal, thermal_work);
+ 
+ 	ret = get_uv(c, &c->boot_uv, &co, &tr);
+ 	if (ret)
+@@ -339,6 +399,8 @@ static int cpuclk_probe(struct platform_device *pdev)
+ 	dev_info(dev, "vddarm %d uV (coarse %u trim %u), CPU %u MHz (CA7_CKG_CFG %#x, MPLL_CFG1 %#x)\n",
+ 		 c->boot_uv, co, tr, get_mhz(c), readl(c->ahb + AP_AHB_CA7_CKG_CFG),
+ 		 readl(c->aon + AON_MPLL_CFG1));
++	c->want_mhz = get_mhz(c);
++	schedule_delayed_work(&c->thermal, msecs_to_jiffies(THERMAL_MS * 5));
+ 	return 0;
+ }
+ 
+diff --git a/include/linux/sc8830-adi.h b/include/linux/sc8830-adi.h
+new file mode 100644
+index 000000000..7efc64ad3
+--- /dev/null
++++ b/include/linux/sc8830-adi.h
+@@ -0,0 +1,15 @@
++/* SPDX-License-Identifier: GPL-2.0 */
++#ifndef _LINUX_SC8830_ADI_H
++#define _LINUX_SC8830_ADI_H
++
++#include <linux/spinlock.h>
++
++/*
++ * One lock for the ADI bus of the SC8830 family. A read is two steps on shared registers (the
++ * address goes to RD_CMD, the answer comes back in RD_DATA), so two drivers reading at once get
++ * each other's data; a read-modify-write on garbage then wipes the register. Every driver that
++ * touches the PMIC through the ADI holds this around each read and each read-modify-write.
++ */
++extern raw_spinlock_t sc8830_adi_lock;
++
++#endif
+diff --git a/sound/arm/sc8830-audio.c b/sound/arm/sc8830-audio.c
+index 2403d787a..4015f70f5 100644
+--- a/sound/arm/sc8830-audio.c
++++ b/sound/arm/sc8830-audio.c
+@@ -30,6 +30,7 @@
+ #include <linux/iopoll.h>
+ #include <linux/module.h>
+ #include <linux/mutex.h>
++#include <linux/sc8830-adi.h>
+ #include <linux/of.h>
+ #include <linux/platform_device.h>
+ #include <linux/uio.h>
+@@ -434,15 +435,23 @@ static void adi_upd(struct sc8830_audio *sa, u32 reg, u16 mask, u16 val)
+ 	unsigned long flags;
+ 	u16 old = 0;
+ 	u32 sts;
++	int try;
+ 
+-	spin_lock_irqsave(&sa->adi_lock, flags);
+-	if (adi_read(sa, reg, &old))
+-		dev_warn(sa->dev, "ADI read 0x%03x failed\n", reg);
++	raw_spin_lock_irqsave(&sc8830_adi_lock, flags);
++	/* never write back a value we did not read: a failed read as 0 wiped PMU0 and the speaker went silent */
++	for (try = 0; try < 5; try++)
++		if (!adi_read(sa, reg, &old))
++			break;
++	if (try == 5) {
++		raw_spin_unlock_irqrestore(&sc8830_adi_lock, flags);
++		dev_warn(sa->dev, "ADI read 0x%03x failed, register left alone\n", reg);
++		return;
++	}
+ 	writel((old & ~mask) | (val & mask), sa->pmic + reg);
+ 	if (readl_poll_timeout_atomic(sa->adi + ADI_FIFO_STS, sts,
+ 				      sts & ADI_FIFO_EMPTY, 1, 1000))
+ 		dev_warn(sa->dev, "ADI write 0x%03x timed out\n", reg);
+-	spin_unlock_irqrestore(&sa->adi_lock, flags);
++	raw_spin_unlock_irqrestore(&sc8830_adi_lock, flags);
+ }
+ 
+ static u16 adi_get(struct sc8830_audio *sa, u32 reg)
+@@ -450,9 +459,9 @@ static u16 adi_get(struct sc8830_audio *sa, u32 reg)
+ 	unsigned long flags;
+ 	u16 val = 0xdead;
+ 
+-	spin_lock_irqsave(&sa->adi_lock, flags);
++	raw_spin_lock_irqsave(&sc8830_adi_lock, flags);
+ 	adi_read(sa, reg, &val);
+-	spin_unlock_irqrestore(&sa->adi_lock, flags);
++	raw_spin_unlock_irqrestore(&sc8830_adi_lock, flags);
+ 	return val;
+ }
+ 
+-- 
+2.56.0
+

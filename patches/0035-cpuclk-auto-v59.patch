@@ -1,0 +1,118 @@
+From 5fb0e3c2c828eb324e43fd1176f545372793ee50 Mon Sep 17 00:00:00 2001
+From: gtex-port <igomezv0921@gmail.com>
+Date: Mon, 26 Oct 2026 00:24:30 -0600
+Subject: [PATCH] sc8830-cpuclk: freq_mhz sets voltage and AXI divider itself,
+ up to 1482 MHz (v59)
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ drivers/thermal/sc8830-cpuclk.c | 54 +++++++++++++++++++++++++++------
+ 1 file changed, 44 insertions(+), 10 deletions(-)
+
+diff --git a/drivers/thermal/sc8830-cpuclk.c b/drivers/thermal/sc8830-cpuclk.c
+index 72591d9c4..e23d908f0 100644
+--- a/drivers/thermal/sc8830-cpuclk.c
++++ b/drivers/thermal/sc8830-cpuclk.c
+@@ -10,7 +10,9 @@
+  * CA7_CKG_CFG, bits 2:0: 3 = TDPLL 768 MHz, 6 = MPLL) is moved to TDPLL while the MPLL is
+  * reprogrammed (AON APB MPLL_CFG1, bits 5:0 = NINT), then back. vddarm is the PMIC's DCDCARM: a
+  * coarse step (CTRL0 bits 2:0 -> 1100/700/800/900/1000/650/1200/1300 mV) plus a fine trim
+- * (CTRL_CAL bits 4:0, 100/32 mV each) added to it. The PMIC sits behind the ADI bus: writes go
++ * (CTRL_CAL bits 4:0, 100/32 mV each) added to it. Writing freq_mhz also sets what the speed
++ * needs (tested on the tablet): up to 1300 MHz nothing extra, up to 1404 MHz +25 mV and AXI /3,
++ * above that +50 mV and AXI /4. The PMIC sits behind the ADI bus: writes go
+  * straight to its window, reads through the ADI read command.
+  */
+ 
+@@ -43,13 +45,14 @@
+ #define  CA7_SEL_MASK		GENMASK(2, 0)
+ #define  CA7_SEL_TDPLL		3
+ #define  CA7_SEL_MPLL		6
++#define  CA7_AXI_DIV_MASK	GENMASK(10, 8)	/* AXI clock = CPU / (field + 1), at most 500 MHz */
+ #define AON_MPLL_CFG1		0x3070
+ #define  MPLL_NINT_MASK		GENMASK(5, 0)
+ #define  MPLL_SDM_EN		BIT(6)
+ 
+ #define PLL_REF_MHZ		26
+ #define MIN_MHZ			(PLL_REF_MHZ * 29)	/* 754: just under TDPLL, never below the safe 768 */
+-#define MAX_MHZ			(PLL_REF_MHZ * 54)	/* 1404 */
++#define MAX_MHZ			(PLL_REF_MHZ * 57)	/* 1482, tested stable */
+ #define MAX_BOOST_MV		100
+ #define MAX_UV			1200000
+ 
+@@ -183,6 +186,16 @@ static void set_mhz(struct cpuclk *c, unsigned int mhz)
+ 	local_irq_restore(flags);
+ }
+ 
++static unsigned int mhz_to_axi_div(unsigned int mhz)
++{
++	return mhz > 1404 ? 4 : 3;
++}
++
++static int mhz_to_boost_mv(unsigned int mhz)
++{
++	return mhz > 1404 ? 50 : mhz > 1300 ? 25 : 0;
++}
++
+ static ssize_t freq_mhz_show(struct device *dev, struct device_attribute *attr, char *buf)
+ {
+ 	struct cpuclk *c = dev_get_drvdata(dev);
+@@ -190,26 +203,47 @@ static ssize_t freq_mhz_show(struct device *dev, struct device_attribute *attr,
+ 	return sysfs_emit(buf, "%u\n", get_mhz(c));
+ }
+ 
++static void set_axi_div(struct cpuclk *c, unsigned int div)
++{
++	u32 v = readl(c->ahb + AP_AHB_CA7_CKG_CFG);
++
++	writel((v & ~CA7_AXI_DIV_MASK) | FIELD_PREP(CA7_AXI_DIV_MASK, div - 1), c->ahb + AP_AHB_CA7_CKG_CFG);
++	readl(c->ahb + AP_AHB_CA7_CKG_CFG);
++}
++
+ static ssize_t freq_mhz_store(struct device *dev, struct device_attribute *attr, const char *buf, size_t n)
+ {
+ 	struct cpuclk *c = dev_get_drvdata(dev);
+-	unsigned int mhz;
+-	int ret = kstrtouint(buf, 0, &mhz);
++	unsigned int mhz, cur, axi;
++	int mv, ret = kstrtouint(buf, 0, &mhz);
+ 
+ 	if (ret)
+ 		return ret;
+ 	mhz = mhz / PLL_REF_MHZ * PLL_REF_MHZ;
+ 	if (mhz < MIN_MHZ || mhz > MAX_MHZ)
+ 		return -EINVAL;
++	axi = mhz_to_axi_div(mhz);
++	mv = mhz_to_boost_mv(mhz);
+ 	mutex_lock(&c->lock);
+-	if (mhz > 1300 && c->boost_mv < 20) {		/* above Samsung's top speed only with extra voltage */
+-		mutex_unlock(&c->lock);
+-		return -EPERM;
++	cur = get_mhz(c);
++	if (mhz > cur) {			/* up: voltage and the slower bus first */
++		ret = mv > c->boost_mv ? set_uv(c, c->boot_uv + mv * 1000) : 0;
++		if (!ret)
++			c->boost_mv = max(c->boost_mv, mv);
++		if (!ret && axi > mhz_to_axi_div(cur))
++			set_axi_div(c, axi);
++		if (!ret)
++			set_mhz(c, mhz);
++	} else {				/* down: clock first */
++		set_mhz(c, mhz);
++		set_axi_div(c, axi);
++		ret = set_uv(c, c->boot_uv + mv * 1000);
++		if (!ret)
++			c->boost_mv = mv;
+ 	}
+-	set_mhz(c, mhz);
+ 	mutex_unlock(&c->lock);
+-	dev_info(dev, "CPU now %u MHz\n", get_mhz(c));
+-	return n;
++	dev_info(dev, "CPU now %u MHz, +%d mV\n", get_mhz(c), c->boost_mv);
++	return ret ?: n;
+ }
+ 
+ static ssize_t boost_mv_show(struct device *dev, struct device_attribute *attr, char *buf)
+-- 
+2.56.0
+

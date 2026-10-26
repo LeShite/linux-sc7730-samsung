@@ -1,0 +1,716 @@
+From cdf7b69a36a1b1d1f87fdada1dae574a6ff31ef3 Mon Sep 17 00:00:00 2001
+From: gtex-port <igomezv0921@gmail.com>
+Date: Sat, 24 Oct 2026 18:11:11 -0600
+Subject: [PATCH 11/11] touch: SC8830 I2C, SC2723 LDOs over ADI, GPIO, MIP4 vdd
+ supply (v14)
+
+---
+ .../dts/unisoc/sc7730-samsung-gtexswifi.dts   |  23 ++
+ arch/arm/boot/dts/unisoc/sc7730.dtsi          |  31 ++
+ arch/arm/configs/gtexswifi.config             |  11 +
+ drivers/i2c/busses/Kconfig                    |   7 +
+ drivers/i2c/busses/Makefile                   |   1 +
+ drivers/i2c/busses/i2c-sprd-sc8830.c          | 230 +++++++++++++++
+ drivers/input/touchscreen/melfas_mip4.c       |   8 +
+ drivers/regulator/Kconfig                     |   7 +
+ drivers/regulator/Makefile                    |   1 +
+ drivers/regulator/sc2723-regulator.c          | 269 ++++++++++++++++++
+ 10 files changed, 588 insertions(+)
+ create mode 100644 drivers/i2c/busses/i2c-sprd-sc8830.c
+ create mode 100644 drivers/regulator/sc2723-regulator.c
+
+diff --git a/arch/arm/boot/dts/unisoc/sc7730-samsung-gtexswifi.dts b/arch/arm/boot/dts/unisoc/sc7730-samsung-gtexswifi.dts
+index cea1c0a49..92fddacd4 100644
+--- a/arch/arm/boot/dts/unisoc/sc7730-samsung-gtexswifi.dts
++++ b/arch/arm/boot/dts/unisoc/sc7730-samsung-gtexswifi.dts
+@@ -95,3 +95,26 @@ &emmc {
+ 	max-frequency = <52000000>;
+ 	status = "okay";
+ };
++
++&pmic {
++	/* touchscreen supply; the vendor touch driver runs it at 3.0 V */
++	vddsim2: vddsim2 {
++		sprd,pd = <0x814 0x8>;
++		sprd,trim = <0x82c 0xff00>;
++		regulator-name = "vddsim2";
++		regulator-min-microvolt = <3000000>;
++		regulator-max-microvolt = <3000000>;
++	};
++};
++
++&i2c1 {
++	sprd,pull-up;
++	status = "okay";
++
++	touchscreen@48 {
++		compatible = "melfas,mip4_ts";
++		reg = <0x48>;
++		interrupts-extended = <&gpio 238 IRQ_TYPE_EDGE_FALLING>;
++		vdd-supply = <&vddsim2>;
++	};
++};
+diff --git a/arch/arm/boot/dts/unisoc/sc7730.dtsi b/arch/arm/boot/dts/unisoc/sc7730.dtsi
+index c5e22556f..c85d375a6 100644
+--- a/arch/arm/boot/dts/unisoc/sc7730.dtsi
++++ b/arch/arm/boot/dts/unisoc/sc7730.dtsi
+@@ -122,6 +122,37 @@ pmu_apb: syscon@402b0000 {
+ 			reg = <0x402b0000 0x1000>;
+ 		};
+ 
++		/* 256 digital GPIOs, same layout as the SC9860 */
++		gpio: gpio@40280000 {
++			compatible = "sprd,sc9860-gpio";
++			reg = <0x40280000 0x1000>;
++			interrupts = <GIC_SPI 35 IRQ_TYPE_LEVEL_HIGH>;
++			gpio-controller;
++			#gpio-cells = <2>;
++			interrupt-controller;
++			#interrupt-cells = <2>;
++		};
++
++		/* the older Spreadtrum I2C block; "eb" is the AP APB clock gate */
++		i2c1: i2c@70600000 {
++			compatible = "sprd,sc8830-i2c";
++			reg = <0x70600000 0x1000>, <0x71300000 0x4>;
++			reg-names = "i2c", "eb";
++			sprd,gate-bit = <9>;
++			interrupts = <GIC_SPI 12 IRQ_TYPE_LEVEL_HIGH>;
++			clock-frequency = <100000>;
++			#address-cells = <1>;
++			#size-cells = <0>;
++			status = "disabled";
++		};
++
++		/* SC2723 PMIC: ADI controller and the PMIC register window */
++		pmic: pmic@40030000 {
++			compatible = "sprd,sc2723-regulator";
++			reg = <0x40030000 0x1000>, <0x40038000 0x1000>;
++			reg-names = "adi", "pmic";
++		};
++
+ 		/* SD card slot (vendor "sdio0") */
+ 		sdc: mmc@20300000 {
+ 			compatible = "sprd,sc8830-sdhci";
+diff --git a/arch/arm/configs/gtexswifi.config b/arch/arm/configs/gtexswifi.config
+index 30e2a01cf..3b00adbca 100644
+--- a/arch/arm/configs/gtexswifi.config
++++ b/arch/arm/configs/gtexswifi.config
+@@ -104,6 +104,17 @@ CONFIG_SPRD_SC8830_GPU_PD=y
+ CONFIG_DRM_LIMA=y
+ CONFIG_DRM_SIMPLEDRM_NAME="sun4i-drm"
+ 
++# Touchscreen: Melfas MIP4 on I2C1, IRQ on GPIO 238, powered from the
++# SC2723 LDO vddsim2 through the ADI bus
++CONFIG_GPIOLIB=y
++CONFIG_GPIO_SPRD=y
++CONFIG_I2C=y
++CONFIG_I2C_SPRD_SC8830=y
++CONFIG_REGULATOR=y
++CONFIG_REGULATOR_SC2723=y
++CONFIG_INPUT_TOUCHSCREEN=y
++CONFIG_TOUCHSCREEN_MELFAS_MIP4=y
++
+ # input: evdev for EmulationStation, uinput for Batocera's pad mapper
+ CONFIG_INPUT_EVDEV=y
+ CONFIG_INPUT_JOYDEV=y
+diff --git a/drivers/i2c/busses/Kconfig b/drivers/i2c/busses/Kconfig
+index 4515ded43..c5d6e3319 100644
+--- a/drivers/i2c/busses/Kconfig
++++ b/drivers/i2c/busses/Kconfig
+@@ -1151,6 +1151,13 @@ config I2C_SIMTEC
+ 	  This driver can also be built as a module. If so, the module
+ 	  will be called i2c-simtec.
+ 
++config I2C_SPRD_SC8830
++	tristate "Spreadtrum SC8830 family I2C controller"
++	depends on ARCH_SPRD || COMPILE_TEST
++	help
++	  The older I2C controller of 32-bit Spreadtrum SC8830 family SoCs
++	  such as the SC7730.
++
+ config I2C_SPRD
+ 	tristate "Spreadtrum I2C interface"
+ 	depends on I2C=y && (ARCH_SPRD || COMPILE_TEST)
+diff --git a/drivers/i2c/busses/Makefile b/drivers/i2c/busses/Makefile
+index fb985769f..7aef9a74f 100644
+--- a/drivers/i2c/busses/Makefile
++++ b/drivers/i2c/busses/Makefile
+@@ -110,6 +110,7 @@ obj-$(CONFIG_I2C_SH7760)	+= i2c-sh7760.o
+ obj-$(CONFIG_I2C_SH_MOBILE)	+= i2c-sh_mobile.o
+ obj-$(CONFIG_I2C_SIMTEC)	+= i2c-simtec.o
+ obj-$(CONFIG_I2C_SPRD)		+= i2c-sprd.o
++obj-$(CONFIG_I2C_SPRD_SC8830)	+= i2c-sprd-sc8830.o
+ obj-$(CONFIG_I2C_ST)		+= i2c-st.o
+ obj-$(CONFIG_I2C_STM32F4)	+= i2c-stm32f4.o
+ obj-$(CONFIG_I2C_STM32F7)	+= i2c-stm32f7-drv.o
+diff --git a/drivers/i2c/busses/i2c-sprd-sc8830.c b/drivers/i2c/busses/i2c-sprd-sc8830.c
+new file mode 100644
+index 000000000..b08c101e2
+--- /dev/null
++++ b/drivers/i2c/busses/i2c-sprd-sc8830.c
+@@ -0,0 +1,230 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * I2C controller of the Spreadtrum SC8830 family (SC7730, ...)
++ *
++ * The older Spreadtrum I2C block (not the one i2c-sprd.c drives): every
++ * byte is a command written to I2C_CMD (data in bits 15:8 with START,
++ * WRITE, READ, STOP and TX_ACK flags), completion shows up as the INT bit in
++ * I2C_CTL and the slave's ACK in I2C_CMD. Polled, like the vendor 3.10
++ * driver (drivers/i2c/busses/i2c-sprd.c), which this follows.
++ */
++
++#include <linux/bitfield.h>
++#include <linux/i2c.h>
++#include <linux/io.h>
++#include <linux/iopoll.h>
++#include <linux/module.h>
++#include <linux/of.h>
++#include <linux/platform_device.h>
++
++#define I2C_CTL			0x00
++#define I2C_CTL_INT		BIT(0)
++#define I2C_CTL_IE		BIT(3)
++#define I2C_CTL_EN		BIT(4)
++#define I2C_CTL_PULLUP_MODE	BIT(10)
++#define I2C_CTL_DUTY		BIT(11)
++
++#define I2C_CMD			0x04
++#define I2C_CMD_INT_ACK		BIT(0)
++#define I2C_CMD_TX_ACK		BIT(1)
++#define I2C_CMD_WRITE		BIT(2)
++#define I2C_CMD_READ		BIT(3)
++#define I2C_CMD_STOP		BIT(4)
++#define I2C_CMD_START		BIT(5)
++#define I2C_CMD_ACK		BIT(6)	/* 1: the slave did not acknowledge */
++#define I2C_CMD_BUSY		BIT(7)
++#define I2C_CMD_DATA		GENMASK(15, 8)
++
++#define I2C_CLKD0		0x08
++#define I2C_CLKD1		0x0c
++
++#define SC8830_I2C_SRC_CLK	26000000
++#define SC8830_I2C_TIMEOUT_US	5000
++
++/* AP APB clock gates of I2C0..I2C4, the optional "eb" register range */
++#define SC8830_AP_APB_EB_I2C(n)	BIT(8 + (n))
++
++struct sc8830_i2c {
++	struct i2c_adapter adap;
++	void __iomem *base;
++	struct device *dev;
++};
++
++static int sc8830_i2c_wait_done(struct sc8830_i2c *i2c)
++{
++	u32 val;
++	int ret;
++
++	ret = readl_poll_timeout_atomic(i2c->base + I2C_CTL, val,
++					val & I2C_CTL_INT, 1,
++					SC8830_I2C_TIMEOUT_US);
++	if (ret)
++		return ret;
++
++	/* acknowledge the interrupt once the command engine is idle */
++	readl_poll_timeout_atomic(i2c->base + I2C_CMD, val, !(val & I2C_CMD_BUSY),
++				  1, SC8830_I2C_TIMEOUT_US);
++	writel((readl(i2c->base + I2C_CMD) & I2C_CMD_DATA) | I2C_CMD_INT_ACK,
++	       i2c->base + I2C_CMD);
++
++	ret = readl_poll_timeout_atomic(i2c->base + I2C_CMD, val,
++					!(val & I2C_CMD_ACK), 1,
++					SC8830_I2C_TIMEOUT_US);
++	return ret ? -ENXIO : 0;
++}
++
++static int sc8830_i2c_cmd(struct sc8830_i2c *i2c, u8 data, u32 flags)
++{
++	writel(FIELD_PREP(I2C_CMD_DATA, data) | flags, i2c->base + I2C_CMD);
++
++	return sc8830_i2c_wait_done(i2c);
++}
++
++static int sc8830_i2c_xfer_msg(struct sc8830_i2c *i2c, struct i2c_msg *msg,
++			       bool last)
++{
++	bool rd = msg->flags & I2C_M_RD;
++	int i, ret;
++
++	writel(readl(i2c->base + I2C_CTL) | I2C_CTL_EN | I2C_CTL_IE,
++	       i2c->base + I2C_CTL);
++
++	ret = sc8830_i2c_cmd(i2c, i2c_8bit_addr_from_msg(msg),
++			     I2C_CMD_START | I2C_CMD_WRITE);
++	if (ret)
++		return ret;
++
++	for (i = 0; i < msg->len; i++) {
++		bool final = i == msg->len - 1;
++
++		if (rd) {
++			/* NACK and STOP after the last byte of a read */
++			ret = sc8830_i2c_cmd(i2c, 0, I2C_CMD_READ |
++					     (final ? I2C_CMD_STOP | I2C_CMD_TX_ACK : 0));
++			if (ret)
++				return ret;
++			msg->buf[i] = FIELD_GET(I2C_CMD_DATA,
++						readl(i2c->base + I2C_CMD));
++		} else {
++			ret = sc8830_i2c_cmd(i2c, msg->buf[i], I2C_CMD_WRITE |
++					     (final && last ? I2C_CMD_STOP : 0));
++			if (ret)
++				return ret;
++		}
++	}
++
++	return 0;
++}
++
++static int sc8830_i2c_xfer(struct i2c_adapter *adap, struct i2c_msg *msgs,
++			   int num)
++{
++	struct sc8830_i2c *i2c = i2c_get_adapdata(adap);
++	int i, ret;
++
++	for (i = 0; i < num; i++) {
++		ret = sc8830_i2c_xfer_msg(i2c, &msgs[i], i == num - 1);
++		if (ret) {
++			/* free the bus for the next transfer */
++			writel(I2C_CMD_STOP, i2c->base + I2C_CMD);
++			sc8830_i2c_wait_done(i2c);
++			return ret;
++		}
++	}
++
++	return num;
++}
++
++static u32 sc8830_i2c_func(struct i2c_adapter *adap)
++{
++	return I2C_FUNC_I2C | I2C_FUNC_SMBUS_EMUL;
++}
++
++static const struct i2c_algorithm sc8830_i2c_algo = {
++	.xfer = sc8830_i2c_xfer,
++	.functionality = sc8830_i2c_func,
++};
++
++static void sc8830_i2c_hw_init(struct sc8830_i2c *i2c, u32 freq, bool pullup)
++{
++	u32 div = SC8830_I2C_SRC_CLK / (4 * freq) - 1;
++	u32 ctl;
++
++	ctl = readl(i2c->base + I2C_CTL) & ~(I2C_CTL_EN | I2C_CTL_IE);
++	writel(ctl, i2c->base + I2C_CTL);
++
++	/* r6p0 "duty" layout: both halves of the period in CLKD0 */
++	writel((div << 16) | div, i2c->base + I2C_CLKD0);
++	writel(0, i2c->base + I2C_CLKD1);
++
++	ctl |= I2C_CTL_EN | I2C_CTL_IE | I2C_CTL_DUTY;
++	if (pullup)
++		ctl |= I2C_CTL_PULLUP_MODE;
++	writel(ctl, i2c->base + I2C_CTL);
++	writel(I2C_CMD_INT_ACK, i2c->base + I2C_CMD);
++}
++
++static int sc8830_i2c_probe(struct platform_device *pdev)
++{
++	struct device *dev = &pdev->dev;
++	struct sc8830_i2c *i2c;
++	struct resource *res;
++	u32 freq = I2C_MAX_STANDARD_MODE_FREQ, bus;
++	int ret;
++
++	i2c = devm_kzalloc(dev, sizeof(*i2c), GFP_KERNEL);
++	if (!i2c)
++		return -ENOMEM;
++
++	i2c->dev = dev;
++	i2c->base = devm_platform_ioremap_resource_byname(pdev, "i2c");
++	if (IS_ERR(i2c->base))
++		return PTR_ERR(i2c->base);
++
++	/* The clock gate register is shared with other blocks: map only */
++	res = platform_get_resource_byname(pdev, IORESOURCE_MEM, "eb");
++	if (res && !of_property_read_u32(dev->of_node, "sprd,gate-bit", &bus)) {
++		void __iomem *eb = devm_ioremap(dev, res->start, resource_size(res));
++
++		if (eb)
++			writel(readl(eb) | BIT(bus), eb);
++	}
++
++	of_property_read_u32(dev->of_node, "clock-frequency", &freq);
++	sc8830_i2c_hw_init(i2c, freq,
++			   of_property_read_bool(dev->of_node, "sprd,pull-up"));
++
++	i2c->adap.owner = THIS_MODULE;
++	i2c->adap.algo = &sc8830_i2c_algo;
++	i2c->adap.retries = 3;
++	i2c->adap.dev.parent = dev;
++	i2c->adap.dev.of_node = dev->of_node;
++	strscpy(i2c->adap.name, dev_name(dev), sizeof(i2c->adap.name));
++	i2c_set_adapdata(&i2c->adap, i2c);
++
++	ret = devm_i2c_add_adapter(dev, &i2c->adap);
++	if (ret)
++		return ret;
++
++	dev_info(dev, "%u Hz, version %04x\n", freq,
++		 readl(i2c->base + I2C_CTL) >> 16);
++	return 0;
++}
++
++static const struct of_device_id sc8830_i2c_of_match[] = {
++	{ .compatible = "sprd,sc8830-i2c" },
++	{ }
++};
++MODULE_DEVICE_TABLE(of, sc8830_i2c_of_match);
++
++static struct platform_driver sc8830_i2c_driver = {
++	.probe = sc8830_i2c_probe,
++	.driver = {
++		.name = "sc8830-i2c",
++		.of_match_table = sc8830_i2c_of_match,
++	},
++};
++module_platform_driver(sc8830_i2c_driver);
++
++MODULE_DESCRIPTION("Spreadtrum SC8830 family I2C controller");
++MODULE_LICENSE("GPL");
+diff --git a/drivers/input/touchscreen/melfas_mip4.c b/drivers/input/touchscreen/melfas_mip4.c
+index 869884219..203827525 100644
+--- a/drivers/input/touchscreen/melfas_mip4.c
++++ b/drivers/input/touchscreen/melfas_mip4.c
+@@ -17,6 +17,7 @@
+ #include <linux/interrupt.h>
+ #include <linux/module.h>
+ #include <linux/of.h>
++#include <linux/regulator/consumer.h>
+ #include <linux/slab.h>
+ #include <linux/unaligned.h>
+ 
+@@ -1451,6 +1452,13 @@ static int mip4_probe(struct i2c_client *client)
+ 	if (IS_ERR(ts->gpio_ce))
+ 		return dev_err_probe(&client->dev, PTR_ERR(ts->gpio_ce), "Failed to get gpio\n");
+ 
++	/* Boards without a CE line may power the controller from a supply */
++	error = devm_regulator_get_enable_optional(&client->dev, "vdd");
++	if (error && error != -ENODEV)
++		return dev_err_probe(&client->dev, error, "Failed to enable vdd\n");
++	if (!error)
++		usleep_range(200 * 1000, 300 * 1000);	/* booting delay */
++
+ 	error = mip4_power_on(ts);
+ 	if (error)
+ 		return error;
+diff --git a/drivers/regulator/Kconfig b/drivers/regulator/Kconfig
+index d84f3d054..22ffb306d 100644
+--- a/drivers/regulator/Kconfig
++++ b/drivers/regulator/Kconfig
+@@ -1425,6 +1425,13 @@ config REGULATOR_S5M8767
+ 	 via I2C bus. S5M8767A have 9 Bucks and 28 LDOs output and
+ 	 supports DVS mode with 8bits of output voltage control.
+ 
++config REGULATOR_SC2723
++	tristate "Spreadtrum SC2723 PMIC LDOs"
++	depends on ARCH_SPRD || COMPILE_TEST
++	help
++	  LDOs of the SC2723 PMIC paired with 32-bit Spreadtrum SC8830
++	  family SoCs, reached through their ADI bus.
++
+ config REGULATOR_SC2731
+ 	tristate "Spreadtrum SC2731 power regulator driver"
+ 	depends on MFD_SC27XX_PMIC || COMPILE_TEST
+diff --git a/drivers/regulator/Makefile b/drivers/regulator/Makefile
+index b31013760..400c54107 100644
+--- a/drivers/regulator/Makefile
++++ b/drivers/regulator/Makefile
+@@ -165,6 +165,7 @@ obj-$(CONFIG_REGULATOR_S2DOS05) += s2dos05-regulator.o
+ obj-$(CONFIG_REGULATOR_S2MPA01) += s2mpa01.o
+ obj-$(CONFIG_REGULATOR_S2MPS11) += s2mps11.o
+ obj-$(CONFIG_REGULATOR_S5M8767) += s5m8767.o
++obj-$(CONFIG_REGULATOR_SC2723) += sc2723-regulator.o
+ obj-$(CONFIG_REGULATOR_SC2731) += sc2731-regulator.o
+ obj-$(CONFIG_REGULATOR_SKY81452) += sky81452-regulator.o
+ obj-$(CONFIG_REGULATOR_SLG51000) += slg51000-regulator.o
+diff --git a/drivers/regulator/sc2723-regulator.c b/drivers/regulator/sc2723-regulator.c
+new file mode 100644
+index 000000000..79b5a8fe5
+--- /dev/null
++++ b/drivers/regulator/sc2723-regulator.c
+@@ -0,0 +1,269 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * LDOs of the Spreadtrum SC2723 PMIC, reached through the ADI bus of the
++ * SC8830 family (SC7730, ...)
++ *
++ * ADI (version 1, as on the SC8830): PMIC registers appear in a window of
++ * the ADI slave space. A write is a plain store of the 16-bit value there
++ * (it goes through a FIFO); a read posts the register's physical address to
++ * RD_CMD and polls RD_DATA, which echoes the low address bits. Taken from
++ * the vendor 3.10 kernel (drivers/platform/sprd/adi.c).
++ *
++ * LDOs (vendor sc2723-regulators.dtsi and sc2723-regulator_dt.c): an
++ * active-high power-down bit, and an 8-bit trim field selecting
++ * 1.2 V + n * 10 mV. Each regulator is described in DT:
++ *	sprd,pd = <offset bit>;
++ *	sprd,trim = <offset mask>;
++ * with offsets relative to the PMIC window.
++ */
++
++#include <linux/bitfield.h>
++#include <linux/io.h>
++#include <linux/iopoll.h>
++#include <linux/module.h>
++#include <linux/of.h>
++#include <linux/platform_device.h>
++#include <linux/regulator/driver.h>
++#include <linux/regulator/of_regulator.h>
++#include <linux/spinlock.h>
++
++#define ADI_GSSI_CFG0		0x1c
++#define ADI_RD_CMD		0x24
++#define ADI_RD_DATA		0x28
++#define ADI_RD_DATA_BUSY	BIT(31)
++#define ADI_RD_DATA_ADDR	GENMASK(30, 16)
++#define ADI_RD_DATA_VAL		GENMASK(15, 0)
++#define ADI_FIFO_STS		0x2c
++#define ADI_FIFO_EMPTY		BIT(10)
++
++#define SC2723_LDO_MIN_UV	1200000
++#define SC2723_LDO_STEP_UV	10000
++
++struct sc2723 {
++	struct device *dev;
++	void __iomem *adi;		/* ADI controller */
++	void __iomem *win;		/* PMIC register window */
++	phys_addr_t win_phys;
++	u32 addr_mask;			/* address bits echoed by reads */
++	spinlock_t lock;
++};
++
++struct sc2723_ldo {
++	struct regulator_desc desc;
++	struct sc2723 *pmic;
++	u32 pd_reg, pd_bit;
++	u32 trim_reg, trim_mask;
++};
++
++static int sc2723_read(struct sc2723 *pmic, u32 reg, u16 *val)
++{
++	u32 phys = pmic->win_phys + reg, data;
++	unsigned long flags;
++	int ret;
++
++	spin_lock_irqsave(&pmic->lock, flags);
++	writel(phys, pmic->adi + ADI_RD_CMD);
++	ret = readl_poll_timeout_atomic(pmic->adi + ADI_RD_DATA, data,
++					!(data & ADI_RD_DATA_BUSY), 1, 2000);
++	spin_unlock_irqrestore(&pmic->lock, flags);
++
++	if (ret)
++		return ret;
++	if ((FIELD_GET(ADI_RD_DATA_ADDR, data) & pmic->addr_mask) !=
++	    (phys & pmic->addr_mask))
++		return -EIO;
++
++	*val = FIELD_GET(ADI_RD_DATA_VAL, data);
++	return 0;
++}
++
++static int sc2723_update(struct sc2723 *pmic, u32 reg, u16 mask, u16 val)
++{
++	unsigned long flags;
++	u16 old;
++	u32 sts;
++	int ret;
++
++	ret = sc2723_read(pmic, reg, &old);
++	if (ret)
++		return ret;
++
++	spin_lock_irqsave(&pmic->lock, flags);
++	writel((old & ~mask) | (val & mask), pmic->win + reg);
++	ret = readl_poll_timeout_atomic(pmic->adi + ADI_FIFO_STS, sts,
++					sts & ADI_FIFO_EMPTY, 1, 1000);
++	spin_unlock_irqrestore(&pmic->lock, flags);
++
++	return ret;
++}
++
++static struct sc2723_ldo *rdev_to_ldo(struct regulator_dev *rdev)
++{
++	return container_of(rdev->desc, struct sc2723_ldo, desc);
++}
++
++static int sc2723_ldo_enable(struct regulator_dev *rdev)
++{
++	struct sc2723_ldo *ldo = rdev_to_ldo(rdev);
++
++	return sc2723_update(ldo->pmic, ldo->pd_reg, ldo->pd_bit, 0);
++}
++
++static int sc2723_ldo_disable(struct regulator_dev *rdev)
++{
++	struct sc2723_ldo *ldo = rdev_to_ldo(rdev);
++
++	return sc2723_update(ldo->pmic, ldo->pd_reg, ldo->pd_bit, ldo->pd_bit);
++}
++
++static int sc2723_ldo_is_enabled(struct regulator_dev *rdev)
++{
++	struct sc2723_ldo *ldo = rdev_to_ldo(rdev);
++	u16 val;
++	int ret;
++
++	ret = sc2723_read(ldo->pmic, ldo->pd_reg, &val);
++	return ret ? ret : !(val & ldo->pd_bit);
++}
++
++static int sc2723_ldo_set_voltage_sel(struct regulator_dev *rdev,
++				      unsigned int sel)
++{
++	struct sc2723_ldo *ldo = rdev_to_ldo(rdev);
++
++	return sc2723_update(ldo->pmic, ldo->trim_reg, ldo->trim_mask,
++			     sel << __ffs(ldo->trim_mask));
++}
++
++static int sc2723_ldo_get_voltage_sel(struct regulator_dev *rdev)
++{
++	struct sc2723_ldo *ldo = rdev_to_ldo(rdev);
++	u16 val;
++	int ret;
++
++	ret = sc2723_read(ldo->pmic, ldo->trim_reg, &val);
++	return ret ? ret : (val & ldo->trim_mask) >> __ffs(ldo->trim_mask);
++}
++
++static const struct regulator_ops sc2723_ldo_ops = {
++	.enable = sc2723_ldo_enable,
++	.disable = sc2723_ldo_disable,
++	.is_enabled = sc2723_ldo_is_enabled,
++	.set_voltage_sel = sc2723_ldo_set_voltage_sel,
++	.get_voltage_sel = sc2723_ldo_get_voltage_sel,
++	.list_voltage = regulator_list_voltage_linear,
++	.map_voltage = regulator_map_voltage_linear,
++};
++
++static int sc2723_register_ldo(struct sc2723 *pmic, struct device_node *np)
++{
++	struct regulator_config cfg = { };
++	struct regulator_dev *rdev;
++	struct sc2723_ldo *ldo;
++	u32 pd[2], trim[2];
++	int ret;
++
++	if (of_property_read_u32_array(np, "sprd,pd", pd, 2) ||
++	    of_property_read_u32_array(np, "sprd,trim", trim, 2) || !trim[1]) {
++		dev_err(pmic->dev, "%pOF: sprd,pd and sprd,trim are required\n", np);
++		return -EINVAL;
++	}
++
++	ldo = devm_kzalloc(pmic->dev, sizeof(*ldo), GFP_KERNEL);
++	if (!ldo)
++		return -ENOMEM;
++
++	ldo->pmic = pmic;
++	ldo->pd_reg = pd[0];
++	ldo->pd_bit = pd[1];
++	ldo->trim_reg = trim[0];
++	ldo->trim_mask = trim[1];
++
++	ldo->desc.name = np->name;
++	ldo->desc.of_match = np->name;
++	ldo->desc.type = REGULATOR_VOLTAGE;
++	ldo->desc.owner = THIS_MODULE;
++	ldo->desc.ops = &sc2723_ldo_ops;
++	ldo->desc.min_uV = SC2723_LDO_MIN_UV;
++	ldo->desc.uV_step = SC2723_LDO_STEP_UV;
++	ldo->desc.n_voltages = (trim[1] >> __ffs(trim[1])) + 1;
++	ldo->desc.enable_time = 1000;
++
++	cfg.dev = pmic->dev;
++	cfg.of_node = np;
++	cfg.init_data = of_get_regulator_init_data(pmic->dev, np, &ldo->desc);
++
++	rdev = devm_regulator_register(pmic->dev, &ldo->desc, &cfg);
++	if (IS_ERR(rdev))
++		return dev_err_probe(pmic->dev, PTR_ERR(rdev),
++				     "%pOF: register failed\n", np);
++
++	ret = sc2723_ldo_get_voltage_sel(rdev);
++	dev_info(pmic->dev, "%s: %s, %d uV\n", np->name,
++		 sc2723_ldo_is_enabled(rdev) > 0 ? "on" : "off",
++		 ret < 0 ? ret : regulator_list_voltage_linear(rdev, ret));
++	return 0;
++}
++
++static int sc2723_probe(struct platform_device *pdev)
++{
++	struct device_node *child;
++	struct sc2723 *pmic;
++	struct resource *res;
++	u32 cfg0, bits;
++	int ret;
++
++	pmic = devm_kzalloc(&pdev->dev, sizeof(*pmic), GFP_KERNEL);
++	if (!pmic)
++		return -ENOMEM;
++
++	pmic->dev = &pdev->dev;
++	spin_lock_init(&pmic->lock);
++
++	pmic->adi = devm_platform_ioremap_resource_byname(pdev, "adi");
++	if (IS_ERR(pmic->adi))
++		return PTR_ERR(pmic->adi);
++
++	res = platform_get_resource_byname(pdev, IORESOURCE_MEM, "pmic");
++	if (!res)
++		return -EINVAL;
++	pmic->win_phys = res->start;
++	pmic->win = devm_ioremap_resource(&pdev->dev, res);
++	if (IS_ERR(pmic->win))
++		return PTR_ERR(pmic->win);
++
++	/* The bootloader set the ADI up; derive the read-back address width */
++	cfg0 = readl(pmic->adi + ADI_GSSI_CFG0);
++	bits = (cfg0 & 0x3f) - ((cfg0 >> 11) & 0x1f) - 1;
++	if (bits > 13)		/* unexpected config: the version 0 width */
++		bits = 9;
++	pmic->addr_mask = GENMASK(bits + 1, 0);
++
++	for_each_available_child_of_node(pdev->dev.of_node, child) {
++		ret = sc2723_register_ldo(pmic, child);
++		if (ret) {
++			of_node_put(child);
++			return ret;
++		}
++	}
++
++	return 0;
++}
++
++static const struct of_device_id sc2723_of_match[] = {
++	{ .compatible = "sprd,sc2723-regulator" },
++	{ }
++};
++MODULE_DEVICE_TABLE(of, sc2723_of_match);
++
++static struct platform_driver sc2723_driver = {
++	.probe = sc2723_probe,
++	.driver = {
++		.name = "sc2723-regulator",
++		.of_match_table = sc2723_of_match,
++	},
++};
++module_platform_driver(sc2723_driver);
++
++MODULE_DESCRIPTION("Spreadtrum SC2723 PMIC LDOs over ADI");
++MODULE_LICENSE("GPL");
+-- 
+2.56.0
+

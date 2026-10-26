@@ -1,0 +1,290 @@
+From 857caadd21c4ec72f4755de5d575079a4d247f0f Mon Sep 17 00:00:00 2001
+From: gtex-port <igomezv0921@gmail.com>
+Date: Sun, 25 Oct 2026 19:03:44 -0600
+Subject: [PATCH] phy: sc8830-usb: USB 2.0 PHY; USB device mode with dwc2 and
+ g_ether (v49)
+
+A network link to the PC over the micro-USB port, for SSH and file copies
+without TWRP. The SC7730's USB controller is a DesignWare HS OTG (dwc2,
+0x20200000, SPI 55). Its PHY bring-up from the vendor's usb_startup():
+vddusb at 3.3 V, PHY power-down off (AON PWR_CTRL bit 0), AHB clock (AP AHB EB
+bit 4), a pulse on the controller/UTMI/PHY resets (AP AHB RST bits 5-7), the
+board's tune value 0x4407ae33 in AP APB USB_PHY_TUNE.
+
+dwc2 in peripheral mode with the legacy CDC ECM gadget (g_ether), fixed MAC
+addresses on the command line so the PC sees the same interface every boot.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../dts/unisoc/sc7730-samsung-gtexswifi.dts   |  19 +++
+ arch/arm/boot/dts/unisoc/sc7730.dtsi          |  19 +++
+ arch/arm/configs/gtexswifi.config             |  11 +-
+ drivers/phy/Kconfig                           |   8 ++
+ drivers/phy/Makefile                          |   1 +
+ drivers/phy/phy-sc8830-usb.c                  | 130 ++++++++++++++++++
+ 6 files changed, 187 insertions(+), 1 deletion(-)
+ create mode 100644 drivers/phy/phy-sc8830-usb.c
+
+diff --git a/arch/arm/boot/dts/unisoc/sc7730-samsung-gtexswifi.dts b/arch/arm/boot/dts/unisoc/sc7730-samsung-gtexswifi.dts
+index 4b3130ce0..fef715534 100644
+--- a/arch/arm/boot/dts/unisoc/sc7730-samsung-gtexswifi.dts
++++ b/arch/arm/boot/dts/unisoc/sc7730-samsung-gtexswifi.dts
+@@ -133,6 +133,16 @@ bat: battery {
+ 	};
+ };
+ 
++&usbphy {
++	vdd-supply = <&vddusb>;
++	sprd,tune-value = <0x4407ae33>;	/* the board's tune_value */
++	status = "okay";
++};
++
++&usb {
++	status = "okay";
++};
++
+ &fgu {
+ 	monitored-battery = <&bat>;
+ 	sprd,rsense = <199 200>;	/* sense resistor, real and specified (0.1 mOhm) */
+@@ -167,6 +177,15 @@ vddsim2: vddsim2 {
+ 		regulator-max-microvolt = <3000000>;
+ 	};
+ 
++	/* USB PHY, 3.3 V as the vendor's usb_ldo_switch() */
++	vddusb: vddusb {
++		sprd,pd = <0x814 0x100>;
++		sprd,trim = <0x83c 0xff>;
++		regulator-name = "vddusb";
++		regulator-min-microvolt = <3300000>;
++		regulator-max-microvolt = <3300000>;
++	};
++
+ 	/* Marlin: download/core DC-DC, its voltage as the bootloader left it (the vendor asks 1.6 V) */
+ 	vddcon: vddcon {
+ 		sprd,pd = <0x814 0x2000>;
+diff --git a/arch/arm/boot/dts/unisoc/sc7730.dtsi b/arch/arm/boot/dts/unisoc/sc7730.dtsi
+index 6e75dd834..e77ce3868 100644
+--- a/arch/arm/boot/dts/unisoc/sc7730.dtsi
++++ b/arch/arm/boot/dts/unisoc/sc7730.dtsi
+@@ -175,6 +175,25 @@ pmic: pmic@40030000 {
+ 			reg-names = "adi", "pmic";
+ 		};
+ 
++		/* USB: DesignWare HS OTG behind the SC8830 USB 2.0 PHY */
++		usbphy: usb-phy@71303000 {
++			compatible = "sprd,sc8830-usb-phy";
++			reg = <0x402e0000 0x100>, <0x20d00000 0x10>, <0x71303000 0x4>;
++			reg-names = "aon", "ahb", "tune";
++			#phy-cells = <0>;
++			status = "disabled";
++		};
++
++		usb: usb@20200000 {
++			compatible = "snps,dwc2";
++			reg = <0x20200000 0x1000>;
++			interrupts = <GIC_SPI 55 IRQ_TYPE_LEVEL_HIGH>;
++			phys = <&usbphy>;
++			phy-names = "usb2-phy";
++			dr_mode = "peripheral";
++			status = "disabled";
++		};
++
+ 		/* Fuel gauge of the SC2723 PMIC (ADI window 0x500) */
+ 		fgu: fuel-gauge@40038500 {
+ 			compatible = "sprd,sc2723-fgu";
+diff --git a/arch/arm/configs/gtexswifi.config b/arch/arm/configs/gtexswifi.config
+index 5766bc54e..41165cc18 100644
+--- a/arch/arm/configs/gtexswifi.config
++++ b/arch/arm/configs/gtexswifi.config
+@@ -51,7 +51,7 @@ CONFIG_SND_SC8830=y
+ # Boot: our DTB is appended to zImage, so SBOOT's copy and cmdline are ignored
+ CONFIG_ARM_APPENDED_DTB=y
+ CONFIG_ARM_ATAG_DTB_COMPAT=y
+-CONFIG_CMDLINE="label=BATOCERA console=tty0 loglevel=7 panic=0 fbcon=nodefer"
++CONFIG_CMDLINE="label=BATOCERA console=tty0 loglevel=7 panic=0 fbcon=nodefer g_ether.dev_addr=02:28:0a:2a:07:02 g_ether.host_addr=02:28:0a:2a:07:01"
+ CONFIG_CMDLINE_FORCE=y
+ 
+ # Display: the panel keeps scanning out the bootloader framebuffer
+@@ -166,3 +166,12 @@ CONFIG_SPRD_SC2331_MARLIN=y
+ # battery: SC2723 fuel gauge
+ CONFIG_POWER_SUPPLY=y
+ CONFIG_BATTERY_SC2723_FGU=y
++# USB device mode: dwc2 + network gadget (CDC ECM) for SSH from the PC
++CONFIG_USB_SUPPORT=y
++CONFIG_USB_GADGET=y
++CONFIG_USB_DWC2=y
++CONFIG_USB_DWC2_PERIPHERAL=y
++CONFIG_USB_ETH=y
++# CONFIG_USB_ETH_RNDIS is not set
++CONFIG_GENERIC_PHY=y
++CONFIG_PHY_SC8830_USB=y
+diff --git a/drivers/phy/Kconfig b/drivers/phy/Kconfig
+index 678dd0452..56067e2f2 100644
+--- a/drivers/phy/Kconfig
++++ b/drivers/phy/Kconfig
+@@ -51,6 +51,14 @@ config PHY_SNPS_EUSB2
+ 	  Enable support for the USB high-speed SNPS eUSB2 phy on select
+ 	  SoCs. The PHY is usually paired with a Synopsys DWC3 USB controller.
+ 
++config PHY_SC8830_USB
++	tristate "Spreadtrum SC8830 USB 2.0 PHY"
++	depends on ARCH_SPRD || COMPILE_TEST
++	select GENERIC_PHY
++	help
++	  USB 2.0 PHY in front of the DesignWare HS OTG controller of the
++	  Spreadtrum SC8830 family (SC7730, Samsung Galaxy Tab A 7.0 SM-T280).
++
+ config PHY_XGENE
+ 	tristate "APM X-Gene 15Gbps PHY support"
+ 	depends on HAS_IOMEM && OF && (ARCH_XGENE || COMPILE_TEST)
+diff --git a/drivers/phy/Makefile b/drivers/phy/Makefile
+index bfb27fb5a..2eaba450a 100644
+--- a/drivers/phy/Makefile
++++ b/drivers/phy/Makefile
+@@ -7,6 +7,7 @@ obj-$(CONFIG_GENERIC_PHY)		+= phy-core.o
+ obj-$(CONFIG_GENERIC_PHY_MIPI_DPHY)	+= phy-core-mipi-dphy.o
+ obj-$(CONFIG_PHY_CAN_TRANSCEIVER)	+= phy-can-transceiver.o
+ obj-$(CONFIG_PHY_LPC18XX_USB_OTG)	+= phy-lpc18xx-usb-otg.o
++obj-$(CONFIG_PHY_SC8830_USB)		+= phy-sc8830-usb.o
+ obj-$(CONFIG_PHY_XGENE)			+= phy-xgene.o
+ obj-$(CONFIG_PHY_PISTACHIO_USB)		+= phy-pistachio-usb.o
+ obj-$(CONFIG_PHY_SNPS_EUSB2)		+= phy-snps-eusb2.o
+diff --git a/drivers/phy/phy-sc8830-usb.c b/drivers/phy/phy-sc8830-usb.c
+new file mode 100644
+index 000000000..9eff79d80
+--- /dev/null
++++ b/drivers/phy/phy-sc8830-usb.c
+@@ -0,0 +1,130 @@
++// SPDX-License-Identifier: GPL-2.0
++/*
++ * USB 2.0 PHY of the Spreadtrum SC8830 family (SC7730), in front of its DesignWare HS OTG (dwc2)
++ * controller at 0x20200000.
++ *
++ * From the vendor 3.10 kernel (drivers/usb/gadget/dwc_otg/usb_hw.c, usb_startup() for SCX35): the
++ * vddusb LDO at 3.3 V, the PHY out of power-down (AON APB PWR_CTRL bit 0), the controller's AHB
++ * clock (AP AHB EB bit 4), a pulse on the controller, UTMI and PHY resets (AP AHB RST bits 5-7),
++ * then the board's tuning value in AP APB USB_PHY_TUNE.
++ */
++
++#include <linux/delay.h>
++#include <linux/io.h>
++#include <linux/module.h>
++#include <linux/of.h>
++#include <linux/phy/phy.h>
++#include <linux/platform_device.h>
++#include <linux/regulator/consumer.h>
++
++#define AON_PWR_CTRL		0x24
++#define  AON_USB_PHY_PD		BIT(0)
++#define AHB_EB			0x00
++#define  AHB_USB_EB		BIT(4)
++#define AHB_RST			0x04
++#define  AHB_USB_RSTS		(BIT(5) | BIT(6) | BIT(7))	/* controller, UTMI, PHY */
++
++struct sc8830_usb_phy {
++	void __iomem *aon, *ahb, *tune;
++	struct regulator *vdd;
++	u32 tune_value;
++};
++
++static void upd(void __iomem *reg, u32 mask, u32 val)
++{
++	writel((readl(reg) & ~mask) | (val & mask), reg);
++}
++
++static int sc8830_usb_phy_power_on(struct phy *phy)
++{
++	struct sc8830_usb_phy *p = phy_get_drvdata(phy);
++	int ret;
++
++	ret = regulator_enable(p->vdd);
++	if (ret)
++		return ret;
++	mdelay(10);
++	upd(p->aon + AON_PWR_CTRL, AON_USB_PHY_PD, 0);
++	upd(p->ahb + AHB_EB, AHB_USB_EB, AHB_USB_EB);
++	mdelay(2);
++	upd(p->ahb + AHB_RST, AHB_USB_RSTS, AHB_USB_RSTS);
++	mdelay(5);
++	upd(p->ahb + AHB_RST, AHB_USB_RSTS, 0);
++	writel(p->tune_value, p->tune);
++	dev_info(&phy->dev, "on, tune %08x\n", readl(p->tune));
++	return 0;
++}
++
++static int sc8830_usb_phy_power_off(struct phy *phy)
++{
++	struct sc8830_usb_phy *p = phy_get_drvdata(phy);
++
++	upd(p->ahb + AHB_EB, AHB_USB_EB, 0);
++	upd(p->aon + AON_PWR_CTRL, AON_USB_PHY_PD, AON_USB_PHY_PD);
++	return regulator_disable(p->vdd);
++}
++
++static const struct phy_ops sc8830_usb_phy_ops = {
++	.power_on = sc8830_usb_phy_power_on,
++	.power_off = sc8830_usb_phy_power_off,
++	.owner = THIS_MODULE,
++};
++
++static void __iomem *map(struct platform_device *pdev, const char *name)
++{
++	struct resource *res = platform_get_resource_byname(pdev, IORESOURCE_MEM, name);
++
++	if (!res)
++		return IOMEM_ERR_PTR(-EINVAL);
++	/* not exclusive: the AON and AP AHB registers are shared with other blocks' drivers */
++	return devm_ioremap(&pdev->dev, res->start, resource_size(res)) ?: IOMEM_ERR_PTR(-ENOMEM);
++}
++
++static int sc8830_usb_phy_probe(struct platform_device *pdev)
++{
++	struct device *dev = &pdev->dev;
++	struct phy_provider *provider;
++	struct sc8830_usb_phy *p;
++	struct phy *phy;
++
++	p = devm_kzalloc(dev, sizeof(*p), GFP_KERNEL);
++	if (!p)
++		return -ENOMEM;
++	p->aon = map(pdev, "aon");
++	p->ahb = map(pdev, "ahb");
++	p->tune = map(pdev, "tune");
++	if (IS_ERR(p->aon) || IS_ERR(p->ahb) || IS_ERR(p->tune))
++		return -ENOMEM;
++	p->tune_value = 0x44073e33;	/* the vendor's default */
++	of_property_read_u32(dev->of_node, "sprd,tune-value", &p->tune_value);
++
++	p->vdd = devm_regulator_get(dev, "vdd");
++	if (IS_ERR(p->vdd))
++		return dev_err_probe(dev, PTR_ERR(p->vdd), "no vdd\n");
++
++	phy = devm_phy_create(dev, NULL, &sc8830_usb_phy_ops);
++	if (IS_ERR(phy))
++		return PTR_ERR(phy);
++	phy_set_drvdata(phy, p);
++
++	provider = devm_of_phy_provider_register(dev, of_phy_simple_xlate);
++	return PTR_ERR_OR_ZERO(provider);
++}
++
++static const struct of_device_id sc8830_usb_phy_of_match[] = {
++	{ .compatible = "sprd,sc8830-usb-phy" },
++	{ }
++};
++MODULE_DEVICE_TABLE(of, sc8830_usb_phy_of_match);
++
++static struct platform_driver sc8830_usb_phy_driver = {
++	.probe = sc8830_usb_phy_probe,
++	.driver = {
++		.name = "sc8830-usb-phy",
++		.of_match_table = sc8830_usb_phy_of_match,
++	},
++};
++module_platform_driver(sc8830_usb_phy_driver);
++
++MODULE_DESCRIPTION("Spreadtrum SC8830 USB 2.0 PHY");
++MODULE_LICENSE("GPL");
+-- 
+2.56.0
+

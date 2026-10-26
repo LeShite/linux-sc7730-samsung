@@ -1,0 +1,384 @@
+From 245e72f420be58987a71dfcae296623adb007c43 Mon Sep 17 00:00:00 2001
+From: gtex-port <igomezv0921@gmail.com>
+Date: Sun, 25 Oct 2026 13:02:44 -0600
+Subject: [PATCH] sc8830-audio: jack ground switch, DANGL/DANGR, EIC jack line,
+ Android's speaker PA config, adi sysfs (v41)
+
+The headphone amplifier came up (HP pop flag 3) but the jack stayed silent.
+The vendor kernel, with CONFIG_SPRD_INTERNAL_HEADSET_SUPPORT, always sets
+GND_PLGPD_EN (ANA_PMU0 bit 4, the jack's ground switch) and sets DANGL/DANGR
+to 0xffff with the class-G amplifier on SC2723 AA; neither was done here.
+
+The jack is detected by the analog EIC, channel 8 (gpio_detect = 312), not by
+the codec's ANA_STS0 flag: poll it every 300 ms, also while nothing plays, and
+log the EIC data and the STS0 insert bits whenever they change.
+
+Speaker PA as Android's tiny_hw.xml "Inter PA Config" 0x130: DEMI on (PMU6
+0x400), DTRI_F 3.
+
+A bring-up sysfs file, adi, dumps the codec registers and updates one PMIC
+register, so scripts can try settings without a new kernel.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ sound/arm/sc8830-audio.c | 187 +++++++++++++++++++++++++++++++++++----
+ 1 file changed, 171 insertions(+), 16 deletions(-)
+
+diff --git a/sound/arm/sc8830-audio.c b/sound/arm/sc8830-audio.c
+index b1dba4994..e1713a66b 100644
+--- a/sound/arm/sc8830-audio.c
++++ b/sound/arm/sc8830-audio.c
+@@ -123,6 +123,12 @@
+ #define AUD_DAC_SDM_H		0x003c
+ 
+ /* PMIC registers, offsets in the ADI window at 0x40038000 */
++#define ANA_EIC_DATA		0x0100		/* analog EIC: channel 8 is the jack's insert line */
++#define ANA_EIC_DMSK		0x0104
++#define ANA_EIC_CTRL(n)		(0x0140 + 4 * (n))
++#define  EIC_DBNC_EN		BIT(14)
++#define  EIC_DBNC_CNT		GENMASK(11, 0)
++#define EIC_JACK		8		/* gpio_detect = 312 = a_eic base 304 + 8 */
+ #define ANA_AUDIFA		0x0400
+ #define ANA_PMU0		0x0600
+ #define  PA_SW_EN		BIT(15)
+@@ -132,6 +138,7 @@
+ #define  VB_EN			BIT(9)
+ #define  VBO_EN			BIT(8)
+ #define  LDOCG_EN		BIT(10)
++#define  GND_PLGPD_EN		BIT(4)		/* the jack's ground switch */
+ #define ANA_PMU1		0x0604
+ #define  LDOCG_EN_FAL_ILD	BIT(3)
+ #define  LDOCG_ISET_FAL		BIT(2)
+@@ -150,6 +157,9 @@
+ #define  PA_LDO_V		GENMASK(10, 8)
+ #define ANA_PMU5		0x0614
+ #define  PA_OVP_V		GENMASK(15, 13)
++#define ANA_PMU6		0x0618
++#define  DRV_OCP_AOR_PD		BIT(15)
++#define  DRV_OCP_AOL_PD		BIT(14)
+ #define ANA_CDC0		0x061c
+ #define  DAC_CLK_EN		BIT(11)
+ #define  DRV_CLK_EN		BIT(8)
+@@ -173,6 +183,7 @@
+ #define ANA_CDC4		0x062c
+ #define  PA_D_EN		BIT(15)
+ #define  PA_DTRI_F		GENMASK(14, 13)
++#define  PA_DEMI_EN		BIT(12)
+ #define ANA_CDC6		0x0634
+ #define  DACL_AOL		BIT(13)
+ #define  DACR_AOL		BIT(12)
+@@ -202,16 +213,21 @@
+ #define  HEADDETECT_PD		BIT(7)
+ #define  HEAD_INS_VREF		GENMASK(9, 8)
+ #define ANA_HDT1		0x066c
++#define  GND_DET_PU_PD		BIT(15)
+ #define  HEAD_L_INT_PU_PD	BIT(14)
+ #define ANA_STS0		0x0674
+ #define  HP_POP_FLG		GENMASK(8, 7)
+ #define  HEAD_INSERT		BIT(10)
++#define  HEAD_INSERT_2		BIT(9)
++#define DANGL			0x0680		/* set to 0xffff with the class-G amp, SC2723 AA only */
++#define DANGR			0x0684
+ #define DIG_CFG0		0x068c
+ #define  AUDIFA_DACL_EN		BIT(9)
+ #define  AUDIFA_DACR_EN		BIT(11)
+ #define ANA_GLB_ARM_MODULE_EN	0x0800
+ #define  ANA_AUD_EN		BIT(4)
+ #define  ANA_HDT_EN		BIT(5)
++#define  ANA_EIC_EN		BIT(3)
+ #define ANA_GLB_ARM_CLK_EN	0x0804
+ #define  CLK_AUD_6P5M_EN	BIT(1)
+ #define  CLK_AUD_HID_EN		BIT(4)
+@@ -219,6 +235,7 @@
+ #define  CLK_AUDIF_EN		BIT(0)
+ #define ANA_GLB_RTC_CLK_EN	0x0808
+ #define  RTC_AUD_EN		BIT(4)
++#define  RTC_EIC_EN		BIT(3)
+ #define ANA_GLB_ARM_RST		0x080c
+ #define  ANA_AUD_RSTS		GENMASK(11, 9)
+ #define ANA_GLB_AUD_SLP_CTRL	0x08a4
+@@ -226,6 +243,9 @@
+ #define  XTL_EN			BIT(8)
+ #define ANA_GLB_AUDIO_CTRL0	0x08fc
+ #define  CLK_AUD_6P5M_TX_INV_EN	BIT(1)
++#define ANA_GLB_AUDIO_CTRL1	0x0900
++#define ANA_GLB_CHIP_ID_LOW	0x093c		/* bits 11:0: version, 0 = AA */
++#define ANA_GLB_CHIP_ID_HIGH	0x0940
+ 
+ /* ADI controller (0x40030000), as in sc2723-regulator.c */
+ #define ADI_GSSI_CFG0		0x1c
+@@ -323,8 +343,12 @@ struct sc8830_audio {
+ 	int hp_gain;			/* ANA_CDC12 HPL_G/HPR_G, 0 .. 15 */
+ 	bool hp_up;			/* class-G amplifier is on */
+ 	bool hp_cg_link;		/* HPL_CGL/HPR_CGR switches of the vendor mixer */
+-	bool jack_invert;		/* polarity of the insert flag, unconfirmed */
+-	int jack_raw;			/* last ANA_STS0 HEAD_INSERT, -1 unknown */
++	bool jack_invert;		/* polarity of the insert line, unconfirmed */
++	int jack_raw;			/* last EIC jack line, -1 unknown */
++	u16 jack_eic, jack_sts;		/* last logged EIC data and ANA_STS0 insert bits */
++	unsigned int jack_logs;
++	struct delayed_work jack;	/* polls the jack, also while nothing plays */
++	bool chip_aa;			/* SC2723 version AA: DANGL/DANGR with the class-G amp */
+ };
+ 
+ /* DAALCCTL0-10 of the vendor's default DA profile (vbc_da_eq_profile_default) */
+@@ -483,6 +507,10 @@ static void hp_on(struct sc8830_audio *sa)
+ 	adi_upd(sa, ANA_PMU1, LDOCG_EN_FAL_ILD | LDOCG_ISET_FAL | LDOCG_RAMP_EN,
+ 		LDOCG_EN_FAL_ILD | LDOCG_ISET_FAL | LDOCG_RAMP_EN);
+ 	adi_upd(sa, ANA_HDT1, HEAD_L_INT_PU_PD, HEAD_L_INT_PU_PD);
++	if (sa->chip_aa) {
++		adi_upd(sa, DANGL, 0xffff, 0xffff);
++		adi_upd(sa, DANGR, 0xffff, 0xffff);
++	}
+ 	adi_upd(sa, ANA_CDC13, CG_G_1 | CG_G_2, FIELD_PREP(CG_G_1, 0x10) | FIELD_PREP(CG_G_2, 7));
+ 	adi_upd(sa, ANA_CDC14, CG_G_1 | CG_G_2, FIELD_PREP(CG_G_1, 0x10) | FIELD_PREP(CG_G_2, 7));
+ 	msleep(30);
+@@ -507,7 +535,11 @@ static void hp_on(struct sc8830_audio *sa)
+ 		adi_upd(sa, ANA_CDC7, HPL_CGL | HPR_CGR, HPL_CGL | HPR_CGR);
+ 
+ 	sa->hp_up = true;
+-	dev_info(sa->dev, "headphone amplifier on, gain %d\n", sa->hp_gain);
++	dev_info(sa->dev, "headphone amplifier on, gain %d | PMU0=%04x PMU1=%04x PMU3=%04x CDC2=%04x CDC3=%04x CDC7=%04x CDC12=%04x CDC13=%04x CDC16=%04x HDT0=%04x HDT1=%04x STS0=%04x DANGL=%04x\n",
++		 sa->hp_gain, adi_get(sa, ANA_PMU0), adi_get(sa, ANA_PMU1), adi_get(sa, ANA_PMU3),
++		 adi_get(sa, ANA_CDC2), adi_get(sa, ANA_CDC3), adi_get(sa, ANA_CDC7),
++		 adi_get(sa, ANA_CDC12), adi_get(sa, ANA_CDC13), adi_get(sa, ANA_CDC16),
++		 adi_get(sa, ANA_HDT0), adi_get(sa, ANA_HDT1), adi_get(sa, ANA_STS0), adi_get(sa, DANGL));
+ }
+ 
+ static void hp_off(struct sc8830_audio *sa)
+@@ -532,13 +564,30 @@ static void hp_off(struct sc8830_audio *sa)
+ 	adi_upd(sa, ANA_CDC3, CG_CHP_EN | CG_REF_EN, 0);
+ 	adi_upd(sa, ANA_PMU0, LDOCG_EN, 0);
+ 	adi_upd(sa, ANA_PMU1, LDOCG_EN_FAL_ILD | LDOCG_ISET_FAL | LDOCG_RAMP_EN, 0);
+-	adi_upd(sa, ANA_HDT1, HEAD_L_INT_PU_PD, 0);
++	if (sa->chip_aa) {
++		adi_upd(sa, DANGL, 0xffff, 0);
++		adi_upd(sa, DANGR, 0xffff, 0);
++	}
+ 
+ 	sa->hp_up = false;
+ 	dev_info(sa->dev, "headphone amplifier off\n");
+ }
+ 
+-/* the insert flag of the headset detector (vendor: headset_sprd_sc2723.c, ANA_STS0 bit 10) */
++/*
++ * The headset detector (vendor: headset_sprd_sc2723.c). Its insert line reaches the analog EIC,
++ * channel 8 (the DTS's gpio_detect = 312, irq_trigger_level_detect = 1: high = plugged in).
++ */
++static void jack_eic_enable(struct sc8830_audio *sa)
++{
++	adi_upd(sa, ANA_GLB_ARM_MODULE_EN, ANA_EIC_EN, ANA_EIC_EN);
++	adi_upd(sa, ANA_GLB_RTC_CLK_EN, RTC_EIC_EN, RTC_EIC_EN);
++	/* the vendor's debounce for EIC 8 (DBNC_CNT8_VALUE), and the line's data unmasked */
++	adi_upd(sa, ANA_EIC_CTRL(EIC_JACK), EIC_DBNC_EN | EIC_DBNC_CNT,
++		EIC_DBNC_EN | FIELD_PREP(EIC_DBNC_CNT, 25));
++	adi_upd(sa, ANA_EIC_DMSK, BIT(EIC_JACK), BIT(EIC_JACK));
++}
++
++/* the detector itself lives in the audio block: set up again each time the codec powers on */
+ static void jack_enable(struct sc8830_audio *sa)
+ {
+ 	adi_upd(sa, ANA_GLB_ARM_MODULE_EN, ANA_HDT_EN, ANA_HDT_EN);
+@@ -546,20 +595,30 @@ static void jack_enable(struct sc8830_audio *sa)
+ 		CLK_AUD_HID_EN | CLK_AUD_HBD_EN);
+ 	adi_upd(sa, ANA_HDT0, HEAD_INS_PD | HEADDETECT_PD | HEAD_SDET | HEAD_INS_VREF,
+ 		FIELD_PREP(HEAD_SDET, 1) | FIELD_PREP(HEAD_INS_VREF, 3));
++	jack_eic_enable(sa);
+ }
+ 
+-/* returns true if the flag changed */
++/* returns true if the jack line changed; logs the EIC and the codec's own insert flags too */
+ static bool jack_poll(struct sc8830_audio *sa)
+ {
+-	u16 sts = adi_get(sa, ANA_STS0);
++	u16 eic = adi_get(sa, ANA_EIC_DATA);
++	u16 sts = sa->powered ? adi_get(sa, ANA_STS0) & (HEAD_INSERT | HEAD_INSERT_2) : sa->jack_sts;
+ 	int raw;
+ 
+-	if (sts == 0xdead)
++	if (eic == 0xdead)
+ 		return false;
+-	raw = !!(sts & HEAD_INSERT);
++	if ((eic != sa->jack_eic || sts != sa->jack_sts) && sa->jack_logs < 100) {
++		sa->jack_logs++;
++		dev_info(sa->dev, "jack: EIC data %04x -> %04x, STS0 insert bits %03x -> %03x\n",
++			 sa->jack_eic, eic, sa->jack_sts, sts);
++	}
++	sa->jack_eic = eic;
++	sa->jack_sts = sts;
++	raw = !!(eic & BIT(EIC_JACK));
+ 	if (raw == sa->jack_raw)
+ 		return false;
+-	dev_info(sa->dev, "jack: ANA_STS0=%04x insert flag %d -> %d\n", sts, sa->jack_raw, raw);
++	dev_info(sa->dev, "jack: %s (line %d -> %d)\n", raw != sa->jack_invert ? "plugged in" : "out",
++		 sa->jack_raw, raw);
+ 	sa->jack_raw = raw;
+ 	return true;
+ }
+@@ -577,6 +636,17 @@ static void apply_outputs(struct sc8830_audio *sa)
+ 	apply_speaker_gain(sa);
+ }
+ 
++static void jack_work(struct work_struct *work)
++{
++	struct sc8830_audio *sa = container_of(work, struct sc8830_audio, jack.work);
++
++	mutex_lock(&sa->lock);
++	if (jack_poll(sa) && sa->out == OUT_AUTO)
++		apply_outputs(sa);
++	mutex_unlock(&sa->lock);
++	schedule_delayed_work(&sa->jack, msecs_to_jiffies(300));
++}
++
+ static void codec_power_on(struct sc8830_audio *sa)
+ {
+ 	/* VBC and codec digital part: ownership (AP, not the modem), clocks, resets */
+@@ -627,6 +697,12 @@ static void codec_power_on(struct sc8830_audio *sa)
+ 	upd(sa->codec, AUD_DAC_CTL, DAC_MUTE_EN, 0);
+ 	upd(sa->codec, AUD_DAC_SDM_L, 0xffff, 0x9999);
+ 	upd(sa->codec, AUD_DAC_SDM_H, 0xff, 0x1);
++	/*
++	 * CONFIG_SPRD_INTERNAL_HEADSET_SUPPORT in sprd_codec_analog_open() and the headset driver's
++	 * USE_HEADSET_WATERPROOF probe: the jack's ground switch on, HEAD_L_INT pull-up off
++	 */
++	adi_upd(sa, ANA_HDT1, GND_DET_PU_PD | HEAD_L_INT_PU_PD, HEAD_L_INT_PU_PD);
++	adi_upd(sa, ANA_PMU0, GND_PLGPD_EN, GND_PLGPD_EN);
+ 
+ 	/* DAPM order of the vendor driver: clocks, DAC switches, mixer into AOL */
+ 	adi_upd(sa, ANA_CDC0, DAC_CLK_EN, DAC_CLK_EN);
+@@ -645,7 +721,14 @@ static void codec_power_on(struct sc8830_audio *sa)
+ 		FIELD_PREP(PA_AB_I, 0) | FIELD_PREP(PA_LDO_V, 7));
+ 	adi_upd(sa, ANA_PMU5, PA_OVP_V, FIELD_PREP(PA_OVP_V, 7));
+ 	adi_upd(sa, ANA_PMU0, OVP_LDO_EN, OVP_LDO_EN);
+-	adi_upd(sa, ANA_CDC4, PA_D_EN | PA_DTRI_F, FIELD_PREP(PA_DTRI_F, 1));
++	/*
++	 * Android's "Inter PA Config" 0x130 (/system/etc/tiny_hw.xml): class AB, no LDO, DEMI on,
++	 * DTRI_F 3. sprd_codec_pa_demi_en() writes PMU6 0x400 with it, then opens the AOL/AOR OCP.
++	 */
++	adi_upd(sa, ANA_PMU6, 0xffff, 0x400);
++	adi_upd(sa, ANA_PMU6, DRV_OCP_AOL_PD | DRV_OCP_AOR_PD, 0);
++	adi_upd(sa, ANA_CDC4, PA_D_EN | PA_DEMI_EN | PA_DTRI_F,
++		PA_DEMI_EN | FIELD_PREP(PA_DTRI_F, 3));
+ 	msleep(20);
+ 	adi_upd(sa, ANA_PMU0, PA_EN, PA_EN);
+ 
+@@ -708,11 +791,6 @@ static void level_work(struct work_struct *work)
+ 	const s16 *buf;
+ 	unsigned int i, frames;
+ 
+-	mutex_lock(&sa->lock);
+-	if (jack_poll(sa) && sa->out == OUT_AUTO)
+-		apply_outputs(sa);
+-	mutex_unlock(&sa->lock);
+-
+ 	if (!ss || !ss->runtime || !ss->runtime->dma_area)
+ 		return;
+ 	buf = (const s16 *)ss->runtime->dma_area;
+@@ -1543,6 +1621,64 @@ static const struct snd_kcontrol_new sc8830_controls[] = {
+ 	},
+ };
+ 
++/*
++ * Bring-up: /sys/devices/platform/soc/.../40020000.audio/adi. Reading dumps the codec's analog
++ * registers, the PMIC globals the codec uses and the EIC; writing "offset mask value" (hex)
++ * updates one PMIC register, so a script can try register settings without a new kernel.
++ */
++static const u16 adi_dump_regs[] = {
++	ANA_EIC_DATA, ANA_EIC_DMSK, ANA_EIC_CTRL(EIC_JACK),
++	ANA_GLB_ARM_MODULE_EN, ANA_GLB_ARM_CLK_EN, ANA_GLB_RTC_CLK_EN, ANA_GLB_AUDIO_CTRL0,
++	ANA_GLB_AUDIO_CTRL1, ANA_GLB_CHIP_ID_LOW, ANA_GLB_CHIP_ID_HIGH,
++};
++
++static ssize_t adi_show(struct device *dev, struct device_attribute *attr, char *buf)
++{
++	struct sc8830_audio *sa = dev_get_drvdata(dev);
++	int len = 0, i;
++	u16 reg;
++
++	mutex_lock(&sa->lock);
++	len += sysfs_emit_at(buf, len, "powered %d hp_up %d out %d jack %d\n", sa->powered,
++			     sa->hp_up, sa->out, sa->jack_raw);
++	for (reg = ANA_PMU0; reg <= DIG_CFG0 + 0x18; reg += 4)
++		len += sysfs_emit_at(buf, len, "%03x=%04x%c", reg, adi_get(sa, reg),
++				     (reg - ANA_PMU0) % 32 == 28 ? '\n' : ' ');
++	len += sysfs_emit_at(buf, len, "\n");
++	for (i = 0; i < ARRAY_SIZE(adi_dump_regs); i++)
++		len += sysfs_emit_at(buf, len, "%03x=%04x ", adi_dump_regs[i],
++				     adi_get(sa, adi_dump_regs[i]));
++	mutex_unlock(&sa->lock);
++	len += sysfs_emit_at(buf, len, "\n");
++	return len;
++}
++
++static ssize_t adi_store(struct device *dev, struct device_attribute *attr,
++			 const char *buf, size_t count)
++{
++	struct sc8830_audio *sa = dev_get_drvdata(dev);
++	unsigned int reg, mask, val;
++
++	if (sscanf(buf, "%x %x %x", &reg, &mask, &val) != 3 || reg >= 0x1000 || reg % 4 ||
++	    mask > 0xffff || val > 0xffff)
++		return -EINVAL;
++	mutex_lock(&sa->lock);
++	adi_upd(sa, reg, mask, val);
++	dev_info(dev, "adi: %03x mask %04x <- %04x, now %04x\n", reg, mask, val, adi_get(sa, reg));
++	mutex_unlock(&sa->lock);
++	return count;
++}
++static DEVICE_ATTR_RW(adi);
++
++static struct attribute *sc8830_attrs[] = {
++	&dev_attr_adi.attr,
++	NULL
++};
++
++static const struct attribute_group sc8830_attr_group = {
++	.attrs = sc8830_attrs,
++};
++
+ /* ---- probe -------------------------------------------------------------- */
+ 
+ static void __iomem *map(struct platform_device *pdev, const char *name,
+@@ -1580,6 +1716,8 @@ static int sc8830_audio_probe(struct platform_device *pdev)
+ 	mutex_init(&sa->lock);
+ 	INIT_DELAYED_WORK(&sa->power_off, power_off_work);
+ 	INIT_DELAYED_WORK(&sa->level, level_work);
++	INIT_DELAYED_WORK(&sa->jack, jack_work);
++	platform_set_drvdata(pdev, sa);
+ 	sa->spk_gain = SPK_GAIN_DEFAULT;
+ 	sa->fifo = VBC_FIFO_FRAMES;
+ 	sa->spk_on = true;
+@@ -1619,6 +1757,15 @@ static int sc8830_audio_probe(struct platform_device *pdev)
+ 		bits = 9;
+ 	sa->addr_mask = GENMASK(bits + 1, 0);
+ 
++	{
++		u16 hi = adi_get(sa, ANA_GLB_CHIP_ID_HIGH), lo = adi_get(sa, ANA_GLB_CHIP_ID_LOW);
++
++		/* the vendor's sci_get_ana_chip_ver() == AUDIO_2723_VER_AA */
++		sa->chip_aa = hi == 0x2723 && !(lo & 0xfff);
++		dev_info(dev, "PMIC chip id %04x%04x, version %03x%s\n", hi, lo, lo & 0xfff,
++			 sa->chip_aa ? " (AA: DANGL/DANGR with the headphone amp)" : "");
++	}
++
+ 	/* the AP DMA must be clocked before any of its registers is touched */
+ 	dev_info(dev, "AP DMA clock was %s\n",
+ 		 readl(sa->ahb + AHB_EB) & AHB_DMA_EB ? "on" : "off");
+@@ -1661,6 +1808,14 @@ static int sc8830_audio_probe(struct platform_device *pdev)
+ 	ret = snd_card_register(card);
+ 	if (ret)
+ 		return ret;
++	ret = devm_device_add_group(dev, &sc8830_attr_group);
++	if (ret)
++		dev_warn(dev, "no adi file in sysfs: %d\n", ret);
++
++	mutex_lock(&sa->lock);
++	jack_eic_enable(sa);
++	mutex_unlock(&sa->lock);
++	schedule_delayed_work(&sa->jack, msecs_to_jiffies(500));
+ 	dev_info(dev, "card registered\n");
+ 	return 0;
+ }
+-- 
+2.56.0
+

@@ -1,0 +1,283 @@
+From 18e6444f95c3a9ba0ac2c99777c82402a019689c Mon Sep 17 00:00:00 2001
+From: gtex-port <igomezv0921@gmail.com>
+Date: Sun, 25 Oct 2026 16:11:02 -0600
+Subject: [PATCH] ARM: dts: sc7730: power the Marlin SC2331 WiFi/BT chip up on
+ SDIO1 (v47)
+
+WiFi phase 1: get the chip to answer on its SDIO bus. From the vendor kernel
+(the board's sprd-marlin node, sprd_power_ctl.c, scx30g3-clocks.dtsi):
+vddcon (DC-DC, 0.6 V + n * 3.125 mV) and vddwifipa on, 32 kHz on CLK_AUX0,
+SDIO1 (0x20400000, SPI 58) clocked from 96 MHz, reset on GPIO 230 through
+mmc-pwrseq-simple.
+
+sdhci-sprd-sc8830 gains sprd,base-clock and sprd,init-regs (register writes
+before the host is touched: nothing else turns the SDIO1 clocks on);
+sc2723-regulator gains sprd,voltage for a DC-DC trim scale.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../dts/unisoc/sc7730-samsung-gtexswifi.dts   | 50 +++++++++++++++++++
+ arch/arm/boot/dts/unisoc/sc7730.dtsi          |  9 ++++
+ arch/arm/configs/gtexswifi.config             |  2 +
+ drivers/mmc/host/sdhci-sprd-sc8830.c          | 45 +++++++++++++++--
+ drivers/regulator/sc2723-regulator.c          | 12 +++--
+ 5 files changed, 110 insertions(+), 8 deletions(-)
+
+diff --git a/arch/arm/boot/dts/unisoc/sc7730-samsung-gtexswifi.dts b/arch/arm/boot/dts/unisoc/sc7730-samsung-gtexswifi.dts
+index 92fddacd4..35e131d99 100644
+--- a/arch/arm/boot/dts/unisoc/sc7730-samsung-gtexswifi.dts
++++ b/arch/arm/boot/dts/unisoc/sc7730-samsung-gtexswifi.dts
+@@ -5,6 +5,7 @@
+ 
+ /dts-v1/;
+ 
++#include <dt-bindings/gpio/gpio.h>
+ #include "sc7730.dtsi"
+ 
+ / {
+@@ -96,6 +97,35 @@ &emmc {
+ 	status = "okay";
+ };
+ 
++/*
++ * Marlin SC2331 WiFi/BT (vendor node "sprd-marlin"): 1.6 V DC-DC vddcon, 3.3 V vddwifipa, 32 kHz on
++ * CLK_AUX0, reset on GPIO 230 (pulsed by the vendor's sprd_download_rst()), SDIO1 at 96 MHz.
++ */
++/ {
++	marlin_pwrseq: marlin-pwrseq {
++		compatible = "mmc-pwrseq-simple";
++		reset-gpios = <&gpio 230 GPIO_ACTIVE_LOW>;
++		post-power-on-delay-ms = <20>;
++	};
++};
++
++&sdio1 {
++	bus-width = <4>;
++	non-removable;
++	keep-power-in-suspend;
++	cap-sd-highspeed;
++	no-mmc;
++	no-sd;
++	max-frequency = <24000000>;
++	mmc-pwrseq = <&marlin_pwrseq>;
++	sprd,base-clock = <96000000>;
++	sprd,init-regs = <0x402e3020 0x000f0007 0x00000000>,	/* CLK_AUX0: 32 kHz, no divider */
++			 <0x402e0004 0x00000004 0x00000004>,	/* AON APB_EB1: AUX0 on */
++			 <0x7120004c 0x00000003 0x00000002>,	/* SDIO1 clock: 96 MHz */
++			 <0x20d00000 0x00000200 0x00000200>;	/* AP AHB EB: SDIO1 on */
++	status = "okay";
++};
++
+ &pmic {
+ 	/* touchscreen supply; the vendor touch driver runs it at 3.0 V */
+ 	vddsim2: vddsim2 {
+@@ -105,6 +135,26 @@ vddsim2: vddsim2 {
+ 		regulator-min-microvolt = <3000000>;
+ 		regulator-max-microvolt = <3000000>;
+ 	};
++
++	/* Marlin: download/core DC-DC, its voltage as the bootloader left it (the vendor asks 1.6 V) */
++	vddcon: vddcon {
++		sprd,pd = <0x814 0x2000>;
++		sprd,trim = <0xa18 0x3ff>;
++		sprd,voltage = <600000 3125>;
++		regulator-name = "vddcon";
++		regulator-always-on;
++	};
++
++	/*
++	 * Marlin: "vdd-pa", 3.3 V per the vendor DTS comment, 1.8 V per its regulator default; nobody
++	 * in the vendor kernel sets it, so leave the voltage alone and only switch it on
++	 */
++	vddwifipa: vddwifipa {
++		sprd,pd = <0x814 0x800>;
++		sprd,trim = <0x818 0xff>;
++		regulator-name = "vddwifipa";
++		regulator-always-on;
++	};
+ };
+ 
+ &i2c1 {
+diff --git a/arch/arm/boot/dts/unisoc/sc7730.dtsi b/arch/arm/boot/dts/unisoc/sc7730.dtsi
+index b11904e1a..6ccb96260 100644
+--- a/arch/arm/boot/dts/unisoc/sc7730.dtsi
++++ b/arch/arm/boot/dts/unisoc/sc7730.dtsi
+@@ -188,6 +188,15 @@ sdc: mmc@20300000 {
+ 			status = "disabled";
+ 		};
+ 
++		/* SDIO of the Marlin SC2331 WiFi/BT chip (vendor "sdio1", "sdio_wifi") */
++		sdio1: mmc@20400000 {
++			compatible = "sprd,sc8830-sdhci";
++			reg = <0x20400000 0x1000>;
++			interrupts = <GIC_SPI 58 IRQ_TYPE_LEVEL_HIGH>;
++			sprd,delays = <0x3 0x3 0x3>;
++			status = "disabled";
++		};
++
+ 		/* eMMC (vendor "sdio3"), set up by the bootloader */
+ 		emmc: mmc@20600000 {
+ 			compatible = "sprd,sc8830-sdhci";
+diff --git a/arch/arm/configs/gtexswifi.config b/arch/arm/configs/gtexswifi.config
+index 662618118..db6b307fd 100644
+--- a/arch/arm/configs/gtexswifi.config
++++ b/arch/arm/configs/gtexswifi.config
+@@ -153,3 +153,5 @@ CONFIG_BINFMT_SCRIPT=y
+ CONFIG_DEVTMPFS=y
+ CONFIG_DEVTMPFS_MOUNT=y
+ CONFIG_TMPFS=y
++# Marlin SC2331 WiFi/BT on SDIO1: reset through the MMC power sequence
++CONFIG_PWRSEQ_SIMPLE=y
+diff --git a/drivers/mmc/host/sdhci-sprd-sc8830.c b/drivers/mmc/host/sdhci-sprd-sc8830.c
+index 9d99e4feb..dd4ec1595 100644
+--- a/drivers/mmc/host/sdhci-sprd-sc8830.c
++++ b/drivers/mmc/host/sdhci-sprd-sc8830.c
+@@ -12,9 +12,15 @@
+  *  - the power control register is unused: the bootloader powers the
+  *    card, so it is left alone;
+  *  - only SDMA was ever used (ADMA hits a BUG_ON in the vendor driver).
++ *
++ * The eMMC and SD hosts run from 384 MHz, set up by the bootloader. The SDIO host of the WiFi chip
++ * (vendor "sdio1") runs from 96 MHz and nobody turns its clocks on, so a node may give
++ *	sprd,base-clock = <Hz>;
++ *	sprd,init-regs = <phys mask value>, ...;	(read-modify-write before the host is touched)
+  */
+ 
+ #include <linux/delay.h>
++#include <linux/io.h>
+ #include <linux/iopoll.h>
+ #include <linux/module.h>
+ #include <linux/of.h>
+@@ -37,6 +43,7 @@
+ 
+ struct sc8830_sdhci {
+ 	u32 delays[3];
++	u32 base_clk;
+ };
+ 
+ static void sc8830_sdhci_reset(struct sdhci_host *host, u8 mask)
+@@ -61,6 +68,7 @@ static void sc8830_sdhci_reset(struct sdhci_host *host, u8 mask)
+ 
+ static void sc8830_sdhci_set_clock(struct sdhci_host *host, unsigned int clock)
+ {
++	struct sc8830_sdhci *priv = sdhci_pltfm_priv(sdhci_priv(host));
+ 	u32 div;
+ 
+ 	host->mmc->actual_clock = 0;
+@@ -69,22 +77,45 @@ static void sc8830_sdhci_set_clock(struct sdhci_host *host, unsigned int clock)
+ 		return;
+ 
+ 	/* smallest divider that does not overclock the card */
+-	div = DIV_ROUND_UP(SC8830_SDHCI_BASE_CLK, 2 * clock);
++	div = DIV_ROUND_UP(priv->base_clk, 2 * clock);
+ 	div = div ? div - 1 : 0;
+ 	div = min_t(u32, div, SC8830_SDHCI_MAX_DIV);
+ 
+-	host->mmc->actual_clock = SC8830_SDHCI_BASE_CLK / (2 * (div + 1));
++	host->mmc->actual_clock = priv->base_clk / (2 * (div + 1));
+ 	sdhci_enable_clk(host, ((div & 0x300) >> 2) | ((div & 0xff) << 8));
+ }
+ 
+ static unsigned int sc8830_sdhci_get_max_clock(struct sdhci_host *host)
+ {
+-	return SC8830_SDHCI_BASE_CLK;
++	return ((struct sc8830_sdhci *)sdhci_pltfm_priv(sdhci_priv(host)))->base_clk;
+ }
+ 
+ static unsigned int sc8830_sdhci_get_min_clock(struct sdhci_host *host)
+ {
+-	return SC8830_SDHCI_BASE_CLK / (2 * (SC8830_SDHCI_MAX_DIV + 1));
++	return sc8830_sdhci_get_max_clock(host) / (2 * (SC8830_SDHCI_MAX_DIV + 1));
++}
++
++/* clocks and gates the bootloader left off: "sprd,init-regs" triples */
++static int sc8830_sdhci_init_regs(struct device *dev)
++{
++	int n = of_property_count_u32_elems(dev->of_node, "sprd,init-regs"), i;
++	u32 t[3];
++
++	for (i = 0; n > 0 && i + 3 <= n; i += 3) {
++		void __iomem *r;
++
++		if (of_property_read_u32_index(dev->of_node, "sprd,init-regs", i, &t[0]) ||
++		    of_property_read_u32_index(dev->of_node, "sprd,init-regs", i + 1, &t[1]) ||
++		    of_property_read_u32_index(dev->of_node, "sprd,init-regs", i + 2, &t[2]))
++			return -EINVAL;
++		r = ioremap(t[0], 4);
++		if (!r)
++			return -ENOMEM;
++		writel((readl(r) & ~t[1]) | (t[2] & t[1]), r);
++		dev_info(dev, "init reg %08x = %08x\n", t[0], readl(r));
++		iounmap(r);
++	}
++	return 0;
+ }
+ 
+ /* The bootloader powers the card; the power control register is unused */
+@@ -120,6 +151,10 @@ static int sc8830_sdhci_probe(struct platform_device *pdev)
+ 	struct sdhci_host *host;
+ 	int ret;
+ 
++	ret = sc8830_sdhci_init_regs(&pdev->dev);
++	if (ret)
++		return ret;
++
+ 	host = sdhci_pltfm_init(pdev, &sc8830_sdhci_pdata, sizeof(*priv));
+ 	if (IS_ERR(host))
+ 		return PTR_ERR(host);
+@@ -128,6 +163,8 @@ static int sc8830_sdhci_probe(struct platform_device *pdev)
+ 	priv = sdhci_pltfm_priv(pltfm_host);
+ 	of_property_read_u32_array(pdev->dev.of_node, "sprd,delays",
+ 				   priv->delays, ARRAY_SIZE(priv->delays));
++	priv->base_clk = SC8830_SDHCI_BASE_CLK;
++	of_property_read_u32(pdev->dev.of_node, "sprd,base-clock", &priv->base_clk);
+ 
+ 	/* What the bootloader left behind, before the first reset */
+ 	dev_info(&pdev->dev,
+diff --git a/drivers/regulator/sc2723-regulator.c b/drivers/regulator/sc2723-regulator.c
+index a865ccd7b..75f41cd85 100644
+--- a/drivers/regulator/sc2723-regulator.c
++++ b/drivers/regulator/sc2723-regulator.c
+@@ -14,7 +14,9 @@
+  * 1.2 V + n * 10 mV. Each regulator is described in DT:
+  *	sprd,pd = <offset bit>;
+  *	sprd,trim = <offset mask>;
+- * with offsets relative to the PMIC window.
++ * with offsets relative to the PMIC window. A DC-DC with another trim scale (vddcon: 0.6 V +
++ * n * 3.125 mV) adds
++ *	sprd,voltage = <min_uV step_uV>;
+  */
+ 
+ #include <linux/bitfield.h>
+@@ -195,7 +197,7 @@ static int sc2723_register_ldo(struct sc2723 *pmic, struct device_node *np)
+ 	struct regulator_config cfg = { };
+ 	struct regulator_dev *rdev;
+ 	struct sc2723_ldo *ldo;
+-	u32 pd[2], trim[2];
++	u32 pd[2], trim[2], volt[2] = { SC2723_LDO_MIN_UV, SC2723_LDO_STEP_UV };
+ 	int ret;
+ 
+ 	if (of_property_read_u32_array(np, "sprd,pd", pd, 2) ||
+@@ -204,6 +206,8 @@ static int sc2723_register_ldo(struct sc2723 *pmic, struct device_node *np)
+ 		return -EINVAL;
+ 	}
+ 
++	of_property_read_u32_array(np, "sprd,voltage", volt, 2);
++
+ 	ldo = devm_kzalloc(pmic->dev, sizeof(*ldo), GFP_KERNEL);
+ 	if (!ldo)
+ 		return -ENOMEM;
+@@ -219,8 +223,8 @@ static int sc2723_register_ldo(struct sc2723 *pmic, struct device_node *np)
+ 	ldo->desc.type = REGULATOR_VOLTAGE;
+ 	ldo->desc.owner = THIS_MODULE;
+ 	ldo->desc.ops = &sc2723_ldo_ops;
+-	ldo->desc.min_uV = SC2723_LDO_MIN_UV;
+-	ldo->desc.uV_step = SC2723_LDO_STEP_UV;
++	ldo->desc.min_uV = volt[0];
++	ldo->desc.uV_step = volt[1];
+ 	ldo->desc.n_voltages = (trim[1] >> __ffs(trim[1])) + 1;
+ 	ldo->desc.enable_time = 1000;
+ 
+-- 
+2.56.0
+

@@ -1,0 +1,68 @@
+From 57a345d1cb15d1d6bc9bc372748ceee7545a0f42 Mon Sep 17 00:00:00 2001
+From: gtex-port <igomezv0921@gmail.com>
+Date: Sun, 25 Oct 2026 19:47:25 -0600
+Subject: [PATCH] usb: dwc2: params for the Spreadtrum SC8830, no power-down
+ (v52)
+
+The SM-T280 gives the dwc2 core no VBUS sense. After a cable pull the core
+went into partial power-down with the PHY clock stopped and never answered
+the host again on the next plug (-71, not even at full speed). Keep it fully
+powered and clocked, and leave LPM off.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ arch/arm/boot/dts/unisoc/sc7730.dtsi |  2 +-
+ drivers/usb/dwc2/params.c            | 17 +++++++++++++++++
+ 2 files changed, 18 insertions(+), 1 deletion(-)
+
+diff --git a/arch/arm/boot/dts/unisoc/sc7730.dtsi b/arch/arm/boot/dts/unisoc/sc7730.dtsi
+index fa8db003f..c2ac28e03 100644
+--- a/arch/arm/boot/dts/unisoc/sc7730.dtsi
++++ b/arch/arm/boot/dts/unisoc/sc7730.dtsi
+@@ -163,7 +163,7 @@ usbphy: usb-phy@71303000 {
+ 		};
+ 
+ 		usb: usb@20200000 {
+-			compatible = "snps,dwc2";
++			compatible = "sprd,sc8830-usb", "snps,dwc2";
+ 			reg = <0x20200000 0x1000>;
+ 			interrupts = <GIC_SPI 55 IRQ_TYPE_LEVEL_HIGH>;
+ 			phys = <&usbphy>;
+diff --git a/drivers/usb/dwc2/params.c b/drivers/usb/dwc2/params.c
+index 091bfcfef..93df11eb0 100644
+--- a/drivers/usb/dwc2/params.c
++++ b/drivers/usb/dwc2/params.c
+@@ -114,6 +114,22 @@ static void dwc2_set_socfpga_agilex_params(struct dwc2_hsotg *hsotg)
+ 	p->no_clock_gating = true;
+ }
+ 
++/*
++ * Spreadtrum SC8830 (SC7730): the board gives the controller no VBUS sense, so after a cable
++ * pull the core must stay fully powered and clocked to see the host's reset on the next plug.
++ */
++static void dwc2_set_sprd_sc8830_params(struct dwc2_hsotg *hsotg)
++{
++	struct dwc2_core_params *p = &hsotg->params;
++
++	p->power_down = DWC2_POWER_DOWN_PARAM_NONE;
++	p->no_clock_gating = true;
++	p->lpm = false;
++	p->lpm_clock_gating = false;
++	p->besl = false;
++	p->hird_threshold_en = false;
++}
++
+ static void dwc2_set_rk_params(struct dwc2_hsotg *hsotg)
+ {
+ 	struct dwc2_core_params *p = &hsotg->params;
+@@ -314,6 +330,7 @@ const struct of_device_id dwc2_of_match_table[] = {
+ 	{ .compatible = "ingenic,x1830-otg", .data = dwc2_set_x1600_params },
+ 	{ .compatible = "ingenic,x2000-otg", .data = dwc2_set_x2000_params },
+ 	{ .compatible = "rockchip,rk3066-usb", .data = dwc2_set_rk_params },
++	{ .compatible = "sprd,sc8830-usb", .data = dwc2_set_sprd_sc8830_params },
+ 	{ .compatible = "lantiq,danube-usb", .data = &dwc2_set_ltq_danube_params },
+ 	{ .compatible = "lantiq,ase-usb", .data = &dwc2_set_ltq_ase_params },
+ 	{ .compatible = "lantiq,arx100-usb", .data = &dwc2_set_ltq_ase_params },
+-- 
+2.56.0
+
