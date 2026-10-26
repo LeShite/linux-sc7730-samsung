@@ -179,6 +179,13 @@
 			status = "disabled";
 		};
 
+		/* CPU and GPU temperature sensors */
+		thermal@402f0000 {
+			compatible = "sprd,sc8830-thermal";
+			reg = <0x402f0000 0x1000>, <0x402e0000 0x4000>;
+			reg-names = "thm", "aon";
+		};
+
 		/* Fuel gauge of the SC2723 PMIC (ADI window 0x500) */
 		fgu: fuel-gauge@40038500 {
 			compatible = "sprd,sc2723-fgu";

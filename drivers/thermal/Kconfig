@@ -229,6 +229,13 @@ config PCIE_THERMAL
 
 	  If you want this support, you should say Y here.
 
+config SC8830_THERMAL
+	tristate "Spreadtrum SC8830 CPU and GPU temperature sensors"
+	depends on ARCH_SPRD || COMPILE_TEST
+	help
+	  Reads the two temperature sensors of the Spreadtrum SC8830 family
+	  (SC7730, Samsung Galaxy Tab A 7.0 SM-T280).
+
 config THERMAL_EMULATION
 	bool "Thermal emulation mode support"
 	help
