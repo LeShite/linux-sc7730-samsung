@@ -191,6 +191,13 @@
 			phys = <&usbphy>;
 			phy-names = "usb2-phy";
 			dr_mode = "peripheral";
+			/*
+			 * FIFOs in 32-bit words, the vendor dwc_otg_driver.c values for SCX35 (3108 of the
+			 * 3598 SPRAM entries); Linux's defaults do not fit and leave no FIFO for an endpoint
+			 */
+			g-rx-fifo-size = <276>;
+			g-np-tx-fifo-size = <16>;
+			g-tx-fifo-size = <64 64 256 256 256 256 256 128 128 128 128 128 128 128 512>;
 			status = "disabled";
 		};
 
