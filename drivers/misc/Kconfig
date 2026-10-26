@@ -653,6 +653,15 @@ config SPRD_SC8830_AUDIO_TEST
 	  the codec by hand (no ALSA, no DMA). Audio bring-up aid for the
 	  Galaxy Tab A 7.0 (SM-T280).
 
+config SPRD_SC2331_MARLIN
+	tristate "Spreadtrum SC2331 Marlin FDL loader"
+	depends on ARCH_SPRD && SERIAL_SPRD && SERIAL_DEV_BUS && GPIOLIB && REGULATOR
+	depends on MMC_SDHCI_SPRD_SC8830 && FW_LOADER
+	help
+	  Load the SC2331 first download loader (FDL1) over UART0 using the
+	  Spreadtrum BootROM protocol, then rescan SDIO1. The FDL firmware must
+	  be available as sc2331_fdl.bin through the firmware loader.
+
 source "drivers/misc/c2port/Kconfig"
 source "drivers/misc/eeprom/Kconfig"
 source "drivers/misc/cb710/Kconfig"
