@@ -236,6 +236,14 @@ config SC8830_THERMAL
 	  Reads the two temperature sensors of the Spreadtrum SC8830 family
 	  (SC7730, Samsung Galaxy Tab A 7.0 SM-T280).
 
+config SC8830_CPUCLK
+	bool "Spreadtrum SC8830 CPU clock and vddarm by hand (overclock tests)"
+	depends on ARCH_SPRD || COMPILE_TEST
+	help
+	  sysfs files to set the CPU clock and add millivolts to vddarm of the
+	  Spreadtrum SC7730 (Samsung Galaxy Tab A 7.0 SM-T280). Changes nothing
+	  at boot.
+
 config THERMAL_EMULATION
 	bool "Thermal emulation mode support"
 	help

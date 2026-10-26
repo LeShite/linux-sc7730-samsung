@@ -186,6 +186,13 @@
 			reg-names = "thm", "aon";
 		};
 
+		/* CPU clock (AP AHB mux, MPLL) and vddarm (PMIC, ADI), set by hand through sysfs */
+		cpuclk@20d03000 {
+			compatible = "sprd,sc8830-cpuclk";
+			reg = <0x40030000 0x1000>, <0x40038000 0x1000>, <0x402e0000 0x4000>, <0x20d00000 0x4000>;
+			reg-names = "adi", "pmic", "aon", "ahb";
+		};
+
 		/* Fuel gauge of the SC2723 PMIC (ADI window 0x500) */
 		fgu: fuel-gauge@40038500 {
 			compatible = "sprd,sc2723-fgu";
