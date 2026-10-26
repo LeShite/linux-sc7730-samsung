@@ -52,6 +52,10 @@
 #define  EFUSE_READ_BUSY	BIT(1)
 #define ANA_GLB_ARM_MODULE_EN	0x0800
 #define  ANA_EFS_EN		BIT(7)
+#define  ANA_FGU_EN		BIT(8)
+#define ANA_GLB_RTC_CLK_EN	0x0808
+#define  RTC_FGU_EN		BIT(7)
+#define  RTC_FGUA_EN		BIT(6)
 
 /* ADI controller (0x40030000), as in sc2723-regulator.c */
 #define ADI_GSSI_CFG0		0x1c
@@ -103,6 +107,33 @@ static void adi_write(struct sc2723_fgu *f, u32 reg, u16 val)
 
 	writel(val, f->pmic + reg);
 	readl_poll_timeout_atomic(f->adi + ADI_FIFO_STS, sts, sts & ADI_FIFO_EMPTY, 1, 1000);
+}
+
+/* set or clear only these bits, re-reading the register right before (other drivers share it) */
+static void adi_bits(struct sc2723_fgu *f, u32 reg, u16 bits, bool on)
+{
+	u16 v;
+
+	if (!adi_read(f, reg, &v))
+		adi_write(f, reg, on ? v | bits : v & ~bits);
+}
+
+/*
+ * The FGU's module enable and clocks in the PMIC globals. Something once cleared FGU_EN after
+ * probe (MODULE_EN read 0x0239 instead of 0x037a): the gauge then returned a frozen reading.
+ * Put them back and say what they were, so the culprit can be found.
+ */
+static void fgu_keep_enabled(struct sc2723_fgu *f)
+{
+	u16 mod, rtc;
+
+	if (adi_read(f, ANA_GLB_ARM_MODULE_EN, &mod) || adi_read(f, ANA_GLB_RTC_CLK_EN, &rtc))
+		return;
+	if ((mod & ANA_FGU_EN) && (rtc & (RTC_FGU_EN | RTC_FGUA_EN)) == (RTC_FGU_EN | RTC_FGUA_EN))
+		return;
+	dev_warn_ratelimited(f->dev, "FGU was off (MODULE_EN %04x RTC_CLK_EN %04x): back on\n", mod, rtc);
+	adi_bits(f, ANA_GLB_ARM_MODULE_EN, ANA_FGU_EN, true);
+	adi_bits(f, ANA_GLB_RTC_CLK_EN, RTC_FGU_EN | RTC_FGUA_EN, true);
 }
 
 /* the FGU updates its registers on its own: read until two reads agree */
@@ -171,12 +202,10 @@ static int capacity(struct sc2723_fgu *f)
 /* one 8-bit efuse block, inverted as the vendor's adie_efuse_read() returns it */
 static int efuse_read(struct sc2723_fgu *f, int blk)
 {
-	u16 v = 0, sts, mod;
+	u16 v = 0, sts;
 	int i;
 
-	if (adi_read(f, ANA_GLB_ARM_MODULE_EN, &mod))
-		return -EIO;
-	adi_write(f, ANA_GLB_ARM_MODULE_EN, mod | ANA_EFS_EN);
+	adi_bits(f, ANA_GLB_ARM_MODULE_EN, ANA_EFS_EN, true);
 	adi_write(f, EFUSE_BLOCK_INDEX, blk & 0x1f);
 	adi_write(f, EFUSE_MODE_CTRL, EFUSE_RD_START);
 	for (i = 0; i < 1000; i++) {
@@ -185,7 +214,7 @@ static int efuse_read(struct sc2723_fgu *f, int blk)
 		udelay(10);
 	}
 	adi_read(f, EFUSE_DATA_RD, &v);
-	adi_write(f, ANA_GLB_ARM_MODULE_EN, mod);
+	adi_bits(f, ANA_GLB_ARM_MODULE_EN, ANA_EFS_EN, false);
 	return (~v) & 0xff;
 }
 
@@ -219,7 +248,10 @@ static void save_work(struct work_struct *work)
 	struct sc2723_fgu *f = container_of(work, struct sc2723_fgu, save.work);
 
 	mutex_lock(&f->lock);
-	save_soc(f, capacity(f));
+	fgu_keep_enabled(f);
+	/* never save from a gauge that reads nonsense: the next boot would start from it */
+	if (read_mv(f) > 3000)
+		save_soc(f, capacity(f));
 	mutex_unlock(&f->lock);
 	schedule_delayed_work(&f->save, SAVE_INTERVAL_S * HZ);
 }
@@ -241,6 +273,7 @@ static int sc2723_fgu_get(struct power_supply *psy, enum power_supply_property p
 	int ret = 0, ma, cap;
 
 	mutex_lock(&f->lock);
+	fgu_keep_enabled(f);
 	switch (psp) {
 	case POWER_SUPPLY_PROP_STATUS:
 		ma = read_ma(f);
@@ -248,9 +281,10 @@ static int sc2723_fgu_get(struct power_supply *psy, enum power_supply_property p
 		/* with a charger driver (sm5701-charger supplies "battery"), trust its cable sense */
 		ret = power_supply_am_i_supplied(psy);
 		if (ret >= 0) {
+			/* plugged in = charging, as Android shows it, even when a PC port gives less than the tablet draws */
 			if (ret && cap >= 100)
 				val->intval = POWER_SUPPLY_STATUS_FULL;
-			else if (ret && ma > -50)
+			else if (ret)
 				val->intval = POWER_SUPPLY_STATUS_CHARGING;
 			else
 				val->intval = POWER_SUPPLY_STATUS_DISCHARGING;
@@ -343,6 +377,7 @@ static int sc2723_fgu_probe(struct platform_device *pdev)
 
 	of_property_read_u32_array(dev->of_node, "sprd,rsense", rsense, 2);	/* real, spec */
 	calibrate(f, rsense[0], rsense[1]);
+	fgu_keep_enabled(f);
 
 	f->cnom_mah = 3950;	/* until the battery info is read: the property callbacks may run */
 	cfg.drv_data = f;

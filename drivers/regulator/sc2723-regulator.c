@@ -30,6 +30,7 @@
 #include <linux/regulator/driver.h>
 #include <linux/regulator/of_regulator.h>
 #include <linux/spinlock.h>
+#include <linux/string.h>
 
 #define ADI_GSSI_CFG0		0x1c
 #define ADI_RD_CMD		0x24
@@ -46,6 +47,23 @@
 #define ANA_GLB_PWR_WR_PROT	0x0950
 #define  PWR_WR_PROT		BIT(15)
 #define  PWR_WR_PROT_KEY	0x6e7f
+
+/* restart (vendor sys_reset.c): the boot mode for the bootloader, then the PMIC watchdog */
+#define ANA_GLB_ARM_MODULE_EN	0x0800
+#define  ANA_WDG_EN		BIT(2)
+#define ANA_GLB_RTC_CLK_EN	0x0808
+#define  RTC_WDG_EN		BIT(2)
+#define ANA_GLB_POR_RST_MONITOR	0x0924
+#define  HWRST_RECOVERY		0x20
+#define  HWRST_NORMAL		0x40
+#define WDG_LOAD_LOW		0x0040
+#define WDG_LOAD_HIGH		0x0044
+#define WDG_CTRL		0x0048
+#define  WDG_CNT_EN		BIT(1)
+#define  WDG_NEW_VER_EN		BIT(2)
+#define  WDG_RST_EN		BIT(3)
+#define WDG_LOCK		0x0060
+#define  WDG_UNLOCK_KEY		0xe551
 
 #define SC2723_LDO_MIN_UV	1200000
 #define SC2723_LDO_STEP_UV	10000
@@ -130,6 +148,30 @@ static int sc2723_power_off(struct sys_off_data *data)
 			prot = 0;
 	sc2723_write(pmic, ANA_GLB_LDO_PD_CTRL, 0xfff);
 	sc2723_write(pmic, ANA_GLB_LDO_DCDC_PD, 0x7fff);
+	mdelay(1000);
+	return NOTIFY_DONE;
+}
+
+/*
+ * sprd_set_reboot_mode() and sprd_turnon_watchdog(): "reboot recovery" boots TWRP, anything else
+ * a normal boot; the watchdog (32768 Hz) fires after ~20 ms and resets the whole board.
+ */
+static int sc2723_restart(struct sys_off_data *data)
+{
+	struct sc2723 *pmic = data->cb_data;
+	const char *cmd = data->cmd;
+	u32 cnt = 32768 / 50;
+
+	sc2723_write(pmic, ANA_GLB_POR_RST_MONITOR,
+		     cmd && !strncmp(cmd, "recovery", 8) ? HWRST_RECOVERY : HWRST_NORMAL);
+	sc2723_update(pmic, ANA_GLB_ARM_MODULE_EN, ANA_WDG_EN, ANA_WDG_EN);
+	sc2723_update(pmic, ANA_GLB_RTC_CLK_EN, RTC_WDG_EN, RTC_WDG_EN);
+	sc2723_write(pmic, WDG_LOCK, WDG_UNLOCK_KEY);
+	sc2723_update(pmic, WDG_CTRL, WDG_NEW_VER_EN, WDG_NEW_VER_EN);
+	sc2723_write(pmic, WDG_LOAD_HIGH, cnt >> 16);
+	sc2723_write(pmic, WDG_LOAD_LOW, cnt & 0xffff);
+	sc2723_update(pmic, WDG_CTRL, WDG_CNT_EN | WDG_RST_EN, WDG_CNT_EN | WDG_RST_EN);
+	sc2723_write(pmic, WDG_LOCK, (u16)~WDG_UNLOCK_KEY);
 	mdelay(1000);
 	return NOTIFY_DONE;
 }
@@ -289,6 +331,9 @@ static int sc2723_probe(struct platform_device *pdev)
 	ret = devm_register_power_off_handler(&pdev->dev, sc2723_power_off, pmic);
 	if (ret)
 		dev_warn(&pdev->dev, "no power-off handler: %d\n", ret);
+	ret = devm_register_restart_handler(&pdev->dev, sc2723_restart, pmic);
+	if (ret)
+		dev_warn(&pdev->dev, "no restart handler: %d\n", ret);
 	return 0;
 }
 
