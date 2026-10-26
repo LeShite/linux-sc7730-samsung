@@ -22,9 +22,13 @@
 #include <linux/delay.h>
 #include <linux/io.h>
 #include <linux/iopoll.h>
+#include <linux/jiffies.h>
 #include <linux/module.h>
+#include <linux/mmc/host.h>
 #include <linux/of.h>
+#include <linux/of_platform.h>
 #include <linux/platform_device.h>
+#include <linux/mmc/sdhci-sprd-sc8830.h>
 
 #include "sdhci-pltfm.h"
 
@@ -44,7 +48,43 @@
 struct sc8830_sdhci {
 	u32 delays[3];
 	u32 base_clk;
+	bool added;
 };
+
+/* Called by the Marlin UART loader after the FDL has started the SDIO core. */
+int sdhci_sprd_sc8830_rescan_sdio(struct device_node *np)
+{
+	struct platform_device *pdev;
+	struct sdhci_host *host;
+	struct sdhci_pltfm_host *pltfm_host;
+	struct sc8830_sdhci *priv;
+	int ret = 0;
+
+	pdev = of_find_device_by_node(np);
+	if (!pdev)
+		return -EPROBE_DEFER;
+
+	host = platform_get_drvdata(pdev);
+	if (!host) {
+		ret = -EPROBE_DEFER;
+		goto out_put;
+	}
+
+	pltfm_host = sdhci_priv(host);
+	priv = sdhci_pltfm_priv(pltfm_host);
+	if (!READ_ONCE(priv->added)) {
+		ret = -EPROBE_DEFER;
+		goto out_put;
+	}
+
+	WRITE_ONCE(host->mmc->caps2,
+		   READ_ONCE(host->mmc->caps2) & ~MMC_CAP2_NO_SDIO);
+	mmc_detect_change(host->mmc, msecs_to_jiffies(100));
+out_put:
+	put_device(&pdev->dev);
+	return ret;
+}
+EXPORT_SYMBOL_GPL(sdhci_sprd_sc8830_rescan_sdio);
 
 static void sc8830_sdhci_reset(struct sdhci_host *host, u8 mask)
 {
@@ -182,7 +222,10 @@ static int sc8830_sdhci_probe(struct platform_device *pdev)
 
 	__sdhci_read_caps(host, &version, &caps, &caps1);
 
-	return sdhci_add_host(host);
+	ret = sdhci_add_host(host);
+	if (!ret)
+		WRITE_ONCE(priv->added, true);
+	return ret;
 }
 
 static const struct of_device_id sc8830_sdhci_of_match[] = {

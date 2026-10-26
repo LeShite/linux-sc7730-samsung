@@ -168,6 +168,44 @@ static inline void serial_out(struct uart_port *port, unsigned int offset,
 	writel_relaxed(value, port->membase + offset);
 }
 
+/* Some SC8830 boards have no CCF clock provider for the UART. */
+static int sprd_uart_init_regs(struct device *dev)
+{
+	int count, i;
+	u32 reg[3];
+
+	count = of_property_count_u32_elems(dev->of_node, "sprd,init-regs");
+	if (count == -EINVAL || count == -ENODATA)
+		return 0;
+	if (count < 0 || count % ARRAY_SIZE(reg)) {
+		dev_err(dev, "invalid sprd,init-regs property\n");
+		return -EINVAL;
+	}
+
+	for (i = 0; i < count; i += ARRAY_SIZE(reg)) {
+		void __iomem *addr;
+		u32 val;
+		int j;
+
+		for (j = 0; j < ARRAY_SIZE(reg); j++)
+			if (of_property_read_u32_index(dev->of_node,
+						       "sprd,init-regs", i + j,
+						       &reg[j]))
+				return -EINVAL;
+
+		addr = ioremap(reg[0], sizeof(u32));
+		if (!addr)
+			return -ENOMEM;
+
+		val = readl(addr);
+		writel((val & ~reg[1]) | (reg[2] & reg[1]), addr);
+		dev_info(dev, "init reg %08x = %08x\n", reg[0], readl(addr));
+		iounmap(addr);
+	}
+
+	return 0;
+}
+
 static unsigned int sprd_tx_empty(struct uart_port *port)
 {
 	if (serial_in(port, SPRD_STS1) & SPRD_TX_FIFO_CNT_MASK)
@@ -1130,6 +1168,7 @@ static int sprd_clk_init(struct uart_port *uport)
 {
 	struct clk *clk_uart, *clk_parent;
 	struct sprd_uart_port *u = container_of(uport, struct sprd_uart_port, port);
+	u32 uart_rate;
 
 	clk_uart = devm_clk_get(uport->dev, "uart");
 	if (IS_ERR(clk_uart)) {
@@ -1151,10 +1190,14 @@ static int sprd_clk_init(struct uart_port *uport)
 		clk_parent = NULL;
 	}
 
-	if (!clk_uart || clk_set_parent(clk_uart, clk_parent))
-		uport->uartclk = SPRD_DEFAULT_SOURCE_CLK;
-	else
+	if (!clk_uart || !clk_parent || clk_set_parent(clk_uart, clk_parent)) {
+		if (of_property_read_u32(uport->dev->of_node,
+					 "clock-frequency", &uart_rate))
+			uart_rate = SPRD_DEFAULT_SOURCE_CLK;
+		uport->uartclk = uart_rate;
+	} else {
 		uport->uartclk = clk_get_rate(clk_uart);
+	}
 
 	u->clk = devm_clk_get(uport->dev, "enable");
 	if (IS_ERR(u->clk)) {
@@ -1203,6 +1246,10 @@ static int sprd_probe(struct platform_device *pdev)
 	up->ops = &serial_sprd_ops;
 	up->flags = UPF_BOOT_AUTOCONF;
 	up->has_sysrq = IS_ENABLED(CONFIG_SERIAL_SPRD_CONSOLE);
+
+	ret = sprd_uart_init_regs(&pdev->dev);
+	if (ret)
+		return ret;
 
 	ret = sprd_clk_init(up);
 	if (ret)
@@ -1286,6 +1333,7 @@ static SIMPLE_DEV_PM_OPS(sprd_pm_ops, sprd_suspend, sprd_resume);
 static const struct of_device_id serial_ids[] = {
 	{.compatible = "sprd,sc9836-uart", .data = &sc9836_data},
 	{.compatible = "sprd,sc9632-uart", .data = &sc9632_data},
+	{.compatible = "sprd,sc8830-uart", .data = &sc9836_data},
 	{}
 };
 MODULE_DEVICE_TABLE(of, serial_ids);

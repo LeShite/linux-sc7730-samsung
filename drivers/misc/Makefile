@@ -76,3 +76,4 @@ obj-y				+= keba/
 obj-y				+= amd-sbi/
 obj-$(CONFIG_MISC_RP1)		+= rp1/
 obj-$(CONFIG_SPRD_SC8830_AUDIO_TEST)	+= sc8830-audio-test.o
+obj-$(CONFIG_SPRD_SC2331_MARLIN)	+= sprd-sc2331-marlin.o

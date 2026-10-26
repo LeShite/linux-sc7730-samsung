@@ -38,6 +38,7 @@
 	aliases {
 		mmc0 = &emmc;
 		mmc1 = &sdc;
+		serial0 = &uart0;
 	};
 
 	memory@80000000 {
@@ -98,14 +99,21 @@
 };
 
 /*
- * Marlin SC2331 WiFi/BT (vendor node "sprd-marlin"): 1.6 V DC-DC vddcon, 3.3 V vddwifipa, 32 kHz on
- * CLK_AUX0, reset on GPIO 230 (pulsed by the vendor's sprd_download_rst()), SDIO1 at 96 MHz.
+ * Marlin SC2331 WiFi/BT: load FDL1 over UART0 before probing SDIO1. The
+ * loader owns GPIO 230 so it can reproduce the vendor reset pulse.
  */
-/ {
-	marlin_pwrseq: marlin-pwrseq {
-		compatible = "mmc-pwrseq-simple";
+&uart0 {
+	status = "okay";
+
+	marlin {
+		compatible = "sprd,sc2331-marlin";
+		firmware-name = "sc2331_fdl.bin";
+		/* The FDL vectors contain absolute pointers based at this address. */
+		sprd,fdl-load-address = <0x80000000>;
 		reset-gpios = <&gpio 230 GPIO_ACTIVE_LOW>;
-		post-power-on-delay-ms = <20>;
+		vddcon-supply = <&vddcon>;
+		vddwifipa-supply = <&vddwifipa>;
+		sdio-host = <&sdio1>;
 	};
 };
 
@@ -138,8 +146,9 @@
 	cap-sd-highspeed;
 	no-mmc;
 	no-sd;
+	/* FDL1 must start the chip before the host sends CMD5. */
+	no-sdio;
 	max-frequency = <24000000>;
-	mmc-pwrseq = <&marlin_pwrseq>;
 	sprd,base-clock = <96000000>;
 	sprd,init-regs = <0x402e3020 0x000f0007 0x00000000>,	/* CLK_AUX0: 32 kHz, no divider */
 			 <0x402e0004 0x00000004 0x00000004>,	/* AON APB_EB1: AUX0 on */

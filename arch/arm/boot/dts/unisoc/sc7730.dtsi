@@ -51,6 +51,14 @@
 		clock-output-names = "clk32k";
 	};
 
+	/* UART0 runs at the 48 MHz source used by the Samsung vendor DTS. */
+	uart0_clk: clock-uart0 {
+		compatible = "fixed-clock";
+		#clock-cells = <0>;
+		clock-frequency = <48000000>;
+		clock-output-names = "uart0";
+	};
+
 	/* set up by gpu_pd: the 384 MHz parent, divider 1 */
 	gpu_clk: clock-gpu {
 		compatible = "fixed-clock";
@@ -143,6 +151,20 @@
 			clock-frequency = <100000>;
 			#address-cells = <1>;
 			#size-cells = <0>;
+			status = "disabled";
+		};
+
+		/* UART0 is the Marlin SC2331 BootROM download port (vendor ttyS0). */
+		uart0: serial@70000000 {
+			compatible = "sprd,sc8830-uart";
+			reg = <0x70000000 0x1000>;
+			interrupts = <GIC_SPI 2 IRQ_TYPE_LEVEL_HIGH>;
+			clock-frequency = <48000000>;
+			clocks = <&uart0_clk>;
+			clock-names = "enable";
+			/* UART0 source=48 MHz, divider=1, AP APB gate bit 13. */
+			sprd,init-regs = <0x71200064 0x00000703 0x00000001>,
+					 <0x71300000 0x00002000 0x00002000>;
 			status = "disabled";
 		};
 
