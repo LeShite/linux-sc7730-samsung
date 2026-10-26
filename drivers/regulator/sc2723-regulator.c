@@ -54,8 +54,6 @@
 #define ANA_GLB_RTC_CLK_EN	0x0808
 #define  RTC_WDG_EN		BIT(2)
 #define ANA_GLB_POR_RST_MONITOR	0x0924
-#define  HWRST_RECOVERY		0x20
-#define  HWRST_NORMAL		0x40
 #define WDG_LOAD_LOW		0x0040
 #define WDG_LOAD_HIGH		0x0044
 #define WDG_CTRL		0x0048
@@ -152,18 +150,34 @@ static int sc2723_power_off(struct sys_off_data *data)
 	return NOTIFY_DONE;
 }
 
+/* the reset reason the bootloader reads (vendor sprd_set_reboot_mode()); a plain reboot is "special" */
+static u16 sc2723_reset_reason(const char *cmd)
+{
+	static const struct { const char *cmd; u16 code; } map[] = {
+		{ "recovery", 0x20 }, { "alarm", 0x50 }, { "fastsleep", 0x60 }, { "bootloader", 0x30 },
+		{ "panic", 0x80 }, { "special", 0x70 }, { "cftreboot", 0x90 }, { "autodloader", 0xa0 },
+		{ "iqmode", 0xb0 },
+	};
+	int i;
+
+	if (!cmd)
+		return 0x70;
+	for (i = 0; i < ARRAY_SIZE(map); i++)
+		if (!strncmp(cmd, map[i].cmd, strlen(map[i].cmd)))
+			return map[i].code;
+	return 0x40;
+}
+
 /*
- * sprd_set_reboot_mode() and sprd_turnon_watchdog(): "reboot recovery" boots TWRP, anything else
- * a normal boot; the watchdog (32768 Hz) fires after ~20 ms and resets the whole board.
+ * The vendor's arch_reset(): the reason, then sprd_turnon_watchdog(50): a count of
+ * 50 * 1000 / 32768 = 1 tick. The watchdog then resets the whole board.
  */
 static int sc2723_restart(struct sys_off_data *data)
 {
 	struct sc2723 *pmic = data->cb_data;
-	const char *cmd = data->cmd;
-	u32 cnt = 32768 / 50;
+	u32 cnt = 50 * 1000 / 32768;
 
-	sc2723_write(pmic, ANA_GLB_POR_RST_MONITOR,
-		     cmd && !strncmp(cmd, "recovery", 8) ? HWRST_RECOVERY : HWRST_NORMAL);
+	sc2723_write(pmic, ANA_GLB_POR_RST_MONITOR, sc2723_reset_reason(data->cmd));
 	sc2723_update(pmic, ANA_GLB_ARM_MODULE_EN, ANA_WDG_EN, ANA_WDG_EN);
 	sc2723_update(pmic, ANA_GLB_RTC_CLK_EN, RTC_WDG_EN, RTC_WDG_EN);
 	sc2723_write(pmic, WDG_LOCK, WDG_UNLOCK_KEY);
