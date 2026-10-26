@@ -163,7 +163,7 @@
 		};
 
 		usb: usb@20200000 {
-			compatible = "snps,dwc2";
+			compatible = "sprd,sc8830-usb", "snps,dwc2";
 			reg = <0x20200000 0x1000>;
 			interrupts = <GIC_SPI 55 IRQ_TYPE_LEVEL_HIGH>;
 			phys = <&usbphy>;

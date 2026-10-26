@@ -114,6 +114,22 @@ static void dwc2_set_socfpga_agilex_params(struct dwc2_hsotg *hsotg)
 	p->no_clock_gating = true;
 }
 
+/*
+ * Spreadtrum SC8830 (SC7730): the board gives the controller no VBUS sense, so after a cable
+ * pull the core must stay fully powered and clocked to see the host's reset on the next plug.
+ */
+static void dwc2_set_sprd_sc8830_params(struct dwc2_hsotg *hsotg)
+{
+	struct dwc2_core_params *p = &hsotg->params;
+
+	p->power_down = DWC2_POWER_DOWN_PARAM_NONE;
+	p->no_clock_gating = true;
+	p->lpm = false;
+	p->lpm_clock_gating = false;
+	p->besl = false;
+	p->hird_threshold_en = false;
+}
+
 static void dwc2_set_rk_params(struct dwc2_hsotg *hsotg)
 {
 	struct dwc2_core_params *p = &hsotg->params;
@@ -314,6 +330,7 @@ const struct of_device_id dwc2_of_match_table[] = {
 	{ .compatible = "ingenic,x1830-otg", .data = dwc2_set_x1600_params },
 	{ .compatible = "ingenic,x2000-otg", .data = dwc2_set_x2000_params },
 	{ .compatible = "rockchip,rk3066-usb", .data = dwc2_set_rk_params },
+	{ .compatible = "sprd,sc8830-usb", .data = dwc2_set_sprd_sc8830_params },
 	{ .compatible = "lantiq,danube-usb", .data = &dwc2_set_ltq_danube_params },
 	{ .compatible = "lantiq,ase-usb", .data = &dwc2_set_ltq_ase_params },
 	{ .compatible = "lantiq,arx100-usb", .data = &dwc2_set_ltq_ase_params },
