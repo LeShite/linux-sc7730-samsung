@@ -30,6 +30,7 @@
 #include <linux/iopoll.h>
 #include <linux/module.h>
 #include <linux/mutex.h>
+#include <linux/sc8830-adi.h>
 #include <linux/of.h>
 #include <linux/platform_device.h>
 #include <linux/uio.h>
@@ -434,15 +435,23 @@ static void adi_upd(struct sc8830_audio *sa, u32 reg, u16 mask, u16 val)
 	unsigned long flags;
 	u16 old = 0;
 	u32 sts;
+	int try;
 
-	spin_lock_irqsave(&sa->adi_lock, flags);
-	if (adi_read(sa, reg, &old))
-		dev_warn(sa->dev, "ADI read 0x%03x failed\n", reg);
+	raw_spin_lock_irqsave(&sc8830_adi_lock, flags);
+	/* never write back a value we did not read: a failed read as 0 wiped PMU0 and the speaker went silent */
+	for (try = 0; try < 5; try++)
+		if (!adi_read(sa, reg, &old))
+			break;
+	if (try == 5) {
+		raw_spin_unlock_irqrestore(&sc8830_adi_lock, flags);
+		dev_warn(sa->dev, "ADI read 0x%03x failed, register left alone\n", reg);
+		return;
+	}
 	writel((old & ~mask) | (val & mask), sa->pmic + reg);
 	if (readl_poll_timeout_atomic(sa->adi + ADI_FIFO_STS, sts,
 				      sts & ADI_FIFO_EMPTY, 1, 1000))
 		dev_warn(sa->dev, "ADI write 0x%03x timed out\n", reg);
-	spin_unlock_irqrestore(&sa->adi_lock, flags);
+	raw_spin_unlock_irqrestore(&sc8830_adi_lock, flags);
 }
 
 static u16 adi_get(struct sc8830_audio *sa, u32 reg)
@@ -450,9 +459,9 @@ static u16 adi_get(struct sc8830_audio *sa, u32 reg)
 	unsigned long flags;
 	u16 val = 0xdead;
 
-	spin_lock_irqsave(&sa->adi_lock, flags);
+	raw_spin_lock_irqsave(&sc8830_adi_lock, flags);
 	adi_read(sa, reg, &val);
-	spin_unlock_irqrestore(&sa->adi_lock, flags);
+	raw_spin_unlock_irqrestore(&sc8830_adi_lock, flags);
 	return val;
 }
 

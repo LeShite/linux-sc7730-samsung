@@ -20,6 +20,7 @@
 #include <linux/iopoll.h>
 #include <linux/module.h>
 #include <linux/mutex.h>
+#include <linux/sc8830-adi.h>
 #include <linux/of.h>
 #include <linux/platform_device.h>
 #include <linux/power_supply.h>
@@ -85,7 +86,8 @@ struct sc2723_fgu {
 	struct delayed_work save;
 };
 
-static int adi_read(struct sc2723_fgu *f, u32 reg, u16 *val)
+/* the caller holds sc8830_adi_lock */
+static int __adi_read(struct sc2723_fgu *f, u32 reg, u16 *val)
 {
 	u32 phys = f->pmic_phys + reg, data;
 	int ret;
@@ -101,21 +103,41 @@ static int adi_read(struct sc2723_fgu *f, u32 reg, u16 *val)
 	return 0;
 }
 
+static int adi_read(struct sc2723_fgu *f, u32 reg, u16 *val)
+{
+	unsigned long flags;
+	int ret;
+
+	raw_spin_lock_irqsave(&sc8830_adi_lock, flags);
+	ret = __adi_read(f, reg, val);
+	raw_spin_unlock_irqrestore(&sc8830_adi_lock, flags);
+	return ret;
+}
+
 static void adi_write(struct sc2723_fgu *f, u32 reg, u16 val)
 {
+	unsigned long flags;
 	u32 sts;
 
+	raw_spin_lock_irqsave(&sc8830_adi_lock, flags);
 	writel(val, f->pmic + reg);
 	readl_poll_timeout_atomic(f->adi + ADI_FIFO_STS, sts, sts & ADI_FIFO_EMPTY, 1, 1000);
+	raw_spin_unlock_irqrestore(&sc8830_adi_lock, flags);
 }
 
 /* set or clear only these bits, re-reading the register right before (other drivers share it) */
 static void adi_bits(struct sc2723_fgu *f, u32 reg, u16 bits, bool on)
 {
+	unsigned long flags;
 	u16 v;
+	u32 sts;
 
-	if (!adi_read(f, reg, &v))
-		adi_write(f, reg, on ? v | bits : v & ~bits);
+	raw_spin_lock_irqsave(&sc8830_adi_lock, flags);
+	if (!__adi_read(f, reg, &v)) {
+		writel(on ? v | bits : v & ~bits, f->pmic + reg);
+		readl_poll_timeout_atomic(f->adi + ADI_FIFO_STS, sts, sts & ADI_FIFO_EMPTY, 1, 1000);
+	}
+	raw_spin_unlock_irqrestore(&sc8830_adi_lock, flags);
 }
 
 /*

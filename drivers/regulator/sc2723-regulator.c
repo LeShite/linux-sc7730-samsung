@@ -29,6 +29,7 @@
 #include <linux/reboot.h>
 #include <linux/regulator/driver.h>
 #include <linux/regulator/of_regulator.h>
+#include <linux/sc8830-adi.h>
 #include <linux/spinlock.h>
 #include <linux/string.h>
 
@@ -82,17 +83,15 @@ struct sc2723_ldo {
 	u32 trim_reg, trim_mask;
 };
 
-static int sc2723_read(struct sc2723 *pmic, u32 reg, u16 *val)
+/* the caller holds sc8830_adi_lock */
+static int __sc2723_read(struct sc2723 *pmic, u32 reg, u16 *val)
 {
 	u32 phys = pmic->win_phys + reg, data;
-	unsigned long flags;
 	int ret;
 
-	spin_lock_irqsave(&pmic->lock, flags);
 	writel(phys, pmic->adi + ADI_RD_CMD);
 	ret = readl_poll_timeout_atomic(pmic->adi + ADI_RD_DATA, data,
 					!(data & ADI_RD_DATA_BUSY), 1, 2000);
-	spin_unlock_irqrestore(&pmic->lock, flags);
 
 	if (ret)
 		return ret;
@@ -104,6 +103,17 @@ static int sc2723_read(struct sc2723 *pmic, u32 reg, u16 *val)
 	return 0;
 }
 
+static int sc2723_read(struct sc2723 *pmic, u32 reg, u16 *val)
+{
+	unsigned long flags;
+	int ret;
+
+	raw_spin_lock_irqsave(&sc8830_adi_lock, flags);
+	ret = __sc2723_read(pmic, reg, val);
+	raw_spin_unlock_irqrestore(&sc8830_adi_lock, flags);
+	return ret;
+}
+
 static int sc2723_update(struct sc2723 *pmic, u32 reg, u16 mask, u16 val)
 {
 	unsigned long flags;
@@ -111,25 +121,27 @@ static int sc2723_update(struct sc2723 *pmic, u32 reg, u16 mask, u16 val)
 	u32 sts;
 	int ret;
 
-	ret = sc2723_read(pmic, reg, &old);
-	if (ret)
-		return ret;
-
-	spin_lock_irqsave(&pmic->lock, flags);
-	writel((old & ~mask) | (val & mask), pmic->win + reg);
-	ret = readl_poll_timeout_atomic(pmic->adi + ADI_FIFO_STS, sts,
-					sts & ADI_FIFO_EMPTY, 1, 1000);
-	spin_unlock_irqrestore(&pmic->lock, flags);
+	raw_spin_lock_irqsave(&sc8830_adi_lock, flags);
+	ret = __sc2723_read(pmic, reg, &old);
+	if (!ret) {
+		writel((old & ~mask) | (val & mask), pmic->win + reg);
+		ret = readl_poll_timeout_atomic(pmic->adi + ADI_FIFO_STS, sts,
+						sts & ADI_FIFO_EMPTY, 1, 1000);
+	}
+	raw_spin_unlock_irqrestore(&sc8830_adi_lock, flags);
 
 	return ret;
 }
 
 static void sc2723_write(struct sc2723 *pmic, u32 reg, u16 val)
 {
+	unsigned long flags;
 	u32 sts;
 
+	raw_spin_lock_irqsave(&sc8830_adi_lock, flags);
 	writel(val, pmic->win + reg);
 	readl_poll_timeout_atomic(pmic->adi + ADI_FIFO_STS, sts, sts & ADI_FIFO_EMPTY, 1, 1000);
+	raw_spin_unlock_irqrestore(&sc8830_adi_lock, flags);
 }
 
 /* the vendor's sequence: LDOs off, unlock the power registers, then all LDOs and DC-DCs off */

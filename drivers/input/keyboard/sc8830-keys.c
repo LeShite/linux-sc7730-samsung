@@ -20,6 +20,7 @@
 #include <linux/module.h>
 #include <linux/of.h>
 #include <linux/platform_device.h>
+#include <linux/sc8830-adi.h>
 #include <linux/workqueue.h>
 
 /* keypad controller (0x40250000) */
@@ -80,6 +81,7 @@ struct sc8830_keys {
 	bool power, voldown;
 };
 
+/* the caller holds sc8830_adi_lock */
 static int adi_read(struct sc8830_keys *k, u32 reg, u16 *val)
 {
 	u32 phys = k->pmic_phys + reg, data;
@@ -99,13 +101,27 @@ static int adi_read(struct sc8830_keys *k, u32 reg, u16 *val)
 /* read-modify-write; the audio driver touches other bits of the same registers under its own lock */
 static void adi_set(struct sc8830_keys *k, u32 reg, u16 bits)
 {
+	unsigned long flags;
 	u16 old;
 	u32 sts;
 
-	if (adi_read(k, reg, &old))
-		return;
-	writel(old | bits, k->pmic + reg);
-	readl_poll_timeout_atomic(k->adi + ADI_FIFO_STS, sts, sts & ADI_FIFO_EMPTY, 1, 1000);
+	raw_spin_lock_irqsave(&sc8830_adi_lock, flags);
+	if (!adi_read(k, reg, &old)) {
+		writel(old | bits, k->pmic + reg);
+		readl_poll_timeout_atomic(k->adi + ADI_FIFO_STS, sts, sts & ADI_FIFO_EMPTY, 1, 1000);
+	}
+	raw_spin_unlock_irqrestore(&sc8830_adi_lock, flags);
+}
+
+static int adi_get(struct sc8830_keys *k, u32 reg, u16 *val)
+{
+	unsigned long flags;
+	int ret;
+
+	raw_spin_lock_irqsave(&sc8830_adi_lock, flags);
+	ret = adi_read(k, reg, val);
+	raw_spin_unlock_irqrestore(&sc8830_adi_lock, flags);
+	return ret;
 }
 
 static void upd(void __iomem *base, u32 reg, u32 mask, u32 val)
@@ -137,7 +153,7 @@ static void poll_work(struct work_struct *work)
 	u16 eic;
 	int i;
 
-	if (!adi_read(k, ANA_EIC_DATA, &eic) && eic == k->eic_last) {
+	if (!adi_get(k, ANA_EIC_DATA, &eic) && eic == k->eic_last) {
 		bool power = (eic ^ k->eic_idle) & BIT(EIC_POWER);
 		bool voldown = (eic ^ k->eic_idle) & BIT(EIC_VOLDOWN);
 
@@ -213,7 +229,7 @@ static int sc8830_keys_probe(struct platform_device *pdev)
 	adi_set(k, ANA_GLB_RTC_CLK_EN, RTC_EIC_EN);
 	adi_set(k, ANA_EIC_DMSK, BIT(EIC_POWER) | BIT(EIC_VOLDOWN));
 	udelay(100);
-	ret = adi_read(k, ANA_EIC_DATA, &k->eic_idle);
+	ret = adi_get(k, ANA_EIC_DATA, &k->eic_idle);
 	if (ret)
 		return dev_err_probe(dev, ret, "cannot read the analog EIC\n");
 	/*

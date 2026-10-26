@@ -23,8 +23,11 @@
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/mutex.h>
+#include <linux/sc8830-adi.h>
 #include <linux/of.h>
 #include <linux/platform_device.h>
+#include <linux/thermal.h>
+#include <linux/workqueue.h>
 
 #define ADI_GSSI_CFG0		0x1c
 #define ADI_RD_CMD		0x24
@@ -55,6 +58,9 @@
 #define MAX_MHZ			(PLL_REF_MHZ * 57)	/* 1482, tested stable */
 #define MAX_BOOST_MV		100
 #define MAX_UV			1200000
+#define THROTTLE_MC		80000		/* above this the clock drops to 1300 MHz... */
+#define RESUME_MC		68000		/* ...and comes back below this */
+#define THERMAL_MS		2000
 
 static const u32 coarse_uv[8] = { 1100000, 700000, 800000, 900000, 1000000, 650000, 1200000, 1300000 };
 
@@ -66,9 +72,13 @@ struct cpuclk {
 	struct mutex lock;
 	int boot_uv;
 	int boost_mv;
+	unsigned int want_mhz;		/* what was asked for; the clock may be held lower while hot */
+	bool throttled;
+	struct delayed_work thermal;
 };
 
-static int adi_read(struct cpuclk *c, u32 reg, u16 *val)
+/* the caller holds sc8830_adi_lock */
+static int __adi_read(struct cpuclk *c, u32 reg, u16 *val)
 {
 	u32 phys = c->pmic_phys + reg, data;
 	int ret;
@@ -83,16 +93,32 @@ static int adi_read(struct cpuclk *c, u32 reg, u16 *val)
 	return 0;
 }
 
+static int adi_read(struct cpuclk *c, u32 reg, u16 *val)
+{
+	unsigned long flags;
+	int ret;
+
+	raw_spin_lock_irqsave(&sc8830_adi_lock, flags);
+	ret = __adi_read(c, reg, val);
+	raw_spin_unlock_irqrestore(&sc8830_adi_lock, flags);
+	return ret;
+}
+
 static int adi_update(struct cpuclk *c, u32 reg, u16 mask, u16 set)
 {
+	unsigned long flags;
 	u16 v;
 	u32 sts;
-	int ret = adi_read(c, reg, &v);
+	int ret;
 
-	if (ret)
-		return ret;
-	writel((v & ~mask) | set, c->pmic + reg);
-	return readl_poll_timeout_atomic(c->adi + ADI_FIFO_STS, sts, sts & ADI_FIFO_EMPTY, 1, 1000);
+	raw_spin_lock_irqsave(&sc8830_adi_lock, flags);
+	ret = __adi_read(c, reg, &v);
+	if (!ret) {
+		writel((v & ~mask) | set, c->pmic + reg);
+		ret = readl_poll_timeout_atomic(c->adi + ADI_FIFO_STS, sts, sts & ADI_FIFO_EMPTY, 1, 1000);
+	}
+	raw_spin_unlock_irqrestore(&sc8830_adi_lock, flags);
+	return ret;
 }
 
 static int get_uv(struct cpuclk *c, int *uv, u16 *coarse, u16 *trim)
@@ -211,21 +237,12 @@ static void set_axi_div(struct cpuclk *c, unsigned int div)
 	readl(c->ahb + AP_AHB_CA7_CKG_CFG);
 }
 
-static ssize_t freq_mhz_store(struct device *dev, struct device_attribute *attr, const char *buf, size_t n)
+/* the caller holds c->lock */
+static int apply_mhz(struct cpuclk *c, unsigned int mhz)
 {
-	struct cpuclk *c = dev_get_drvdata(dev);
-	unsigned int mhz, cur, axi;
-	int mv, ret = kstrtouint(buf, 0, &mhz);
+	unsigned int cur = get_mhz(c), axi = mhz_to_axi_div(mhz);
+	int mv = mhz_to_boost_mv(mhz), ret = 0;
 
-	if (ret)
-		return ret;
-	mhz = mhz / PLL_REF_MHZ * PLL_REF_MHZ;
-	if (mhz < MIN_MHZ || mhz > MAX_MHZ)
-		return -EINVAL;
-	axi = mhz_to_axi_div(mhz);
-	mv = mhz_to_boost_mv(mhz);
-	mutex_lock(&c->lock);
-	cur = get_mhz(c);
 	if (mhz > cur) {			/* up: voltage and the slower bus first */
 		ret = mv > c->boost_mv ? set_uv(c, c->boot_uv + mv * 1000) : 0;
 		if (!ret)
@@ -241,9 +258,51 @@ static ssize_t freq_mhz_store(struct device *dev, struct device_attribute *attr,
 		if (!ret)
 			c->boost_mv = mv;
 	}
+	return ret;
+}
+
+static ssize_t freq_mhz_store(struct device *dev, struct device_attribute *attr, const char *buf, size_t n)
+{
+	struct cpuclk *c = dev_get_drvdata(dev);
+	unsigned int mhz;
+	int ret = kstrtouint(buf, 0, &mhz);
+
+	if (ret)
+		return ret;
+	mhz = mhz / PLL_REF_MHZ * PLL_REF_MHZ;
+	if (mhz < MIN_MHZ || mhz > MAX_MHZ)
+		return -EINVAL;
+	mutex_lock(&c->lock);
+	c->want_mhz = mhz;
+	ret = c->throttled ? 0 : apply_mhz(c, mhz);	/* hot: it is applied when it cools */
 	mutex_unlock(&c->lock);
-	dev_info(dev, "CPU now %u MHz, +%d mV\n", get_mhz(c), c->boost_mv);
+	dev_info(dev, "CPU asked %u MHz%s, now %u MHz, +%d mV\n", mhz, c->throttled ? " (held back: hot)" : "",
+		 get_mhz(c), c->boost_mv);
 	return ret ?: n;
+}
+
+/* CPU sensor of sc8830-thermal: too hot -> 1300 MHz, cooled -> back to what was asked */
+static void thermal_work(struct work_struct *w)
+{
+	struct cpuclk *c = container_of(to_delayed_work(w), struct cpuclk, thermal);
+	struct thermal_zone_device *tz = thermal_zone_get_zone_by_name("cpu_thermal");
+	int temp;
+
+	if (!IS_ERR(tz) && !thermal_zone_get_temp(tz, &temp)) {
+		mutex_lock(&c->lock);
+		if (!c->throttled && temp >= THROTTLE_MC && get_mhz(c) > 1300) {
+			c->throttled = true;
+			apply_mhz(c, 1300);
+			dev_warn(c->dev, "%d mC: held at 1300 MHz\n", temp);
+		} else if (c->throttled && temp <= RESUME_MC) {
+			c->throttled = false;
+			if (c->want_mhz > 1300)
+				apply_mhz(c, c->want_mhz);
+			dev_info(c->dev, "%d mC: back to %u MHz\n", temp, c->want_mhz);
+		}
+		mutex_unlock(&c->lock);
+	}
+	schedule_delayed_work(&c->thermal, msecs_to_jiffies(THERMAL_MS));
 }
 
 static ssize_t boost_mv_show(struct device *dev, struct device_attribute *attr, char *buf)
@@ -332,6 +391,7 @@ static int cpuclk_probe(struct platform_device *pdev)
 		bits = 9;
 	c->addr_mask = GENMASK(bits + 1, 0);
 	platform_set_drvdata(pdev, c);
+	INIT_DELAYED_WORK(&c->thermal, thermal_work);
 
 	ret = get_uv(c, &c->boot_uv, &co, &tr);
 	if (ret)
@@ -339,6 +399,8 @@ static int cpuclk_probe(struct platform_device *pdev)
 	dev_info(dev, "vddarm %d uV (coarse %u trim %u), CPU %u MHz (CA7_CKG_CFG %#x, MPLL_CFG1 %#x)\n",
 		 c->boot_uv, co, tr, get_mhz(c), readl(c->ahb + AP_AHB_CA7_CKG_CFG),
 		 readl(c->aon + AON_MPLL_CFG1));
+	c->want_mhz = get_mhz(c);
+	schedule_delayed_work(&c->thermal, msecs_to_jiffies(THERMAL_MS * 5));
 	return 0;
 }
 
