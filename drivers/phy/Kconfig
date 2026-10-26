@@ -51,6 +51,14 @@ config PHY_SNPS_EUSB2
 	  Enable support for the USB high-speed SNPS eUSB2 phy on select
 	  SoCs. The PHY is usually paired with a Synopsys DWC3 USB controller.
 
+config PHY_SC8830_USB
+	tristate "Spreadtrum SC8830 USB 2.0 PHY"
+	depends on ARCH_SPRD || COMPILE_TEST
+	select GENERIC_PHY
+	help
+	  USB 2.0 PHY in front of the DesignWare HS OTG controller of the
+	  Spreadtrum SC8830 family (SC7730, Samsung Galaxy Tab A 7.0 SM-T280).
+
 config PHY_XGENE
 	tristate "APM X-Gene 15Gbps PHY support"
 	depends on HAS_IOMEM && OF && (ARCH_XGENE || COMPILE_TEST)
