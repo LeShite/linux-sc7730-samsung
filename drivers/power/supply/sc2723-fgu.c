@@ -245,6 +245,19 @@ static int sc2723_fgu_get(struct power_supply *psy, enum power_supply_property p
 	case POWER_SUPPLY_PROP_STATUS:
 		ma = read_ma(f);
 		cap = capacity(f);
+		/* with a charger driver (sm5701-charger supplies "battery"), trust its cable sense */
+		ret = power_supply_am_i_supplied(psy);
+		if (ret >= 0) {
+			if (ret && cap >= 100)
+				val->intval = POWER_SUPPLY_STATUS_FULL;
+			else if (ret && ma > -50)
+				val->intval = POWER_SUPPLY_STATUS_CHARGING;
+			else
+				val->intval = POWER_SUPPLY_STATUS_DISCHARGING;
+			ret = 0;
+			break;
+		}
+		ret = 0;
 		if (ma > 20)
 			val->intval = cap >= 100 ? POWER_SUPPLY_STATUS_FULL : POWER_SUPPLY_STATUS_CHARGING;
 		else if (ma > -20 && cap >= 100)

@@ -135,6 +135,43 @@
 	status = "okay";
 };
 
+/*
+ * Charger and MUIC, each on a GPIO I2C bus as in the vendor DTS (i2c_gpio6 and i2c_gpio7):
+ * SM5701 charger at 0x49 (SDA GPIO 159, SCL GPIO 160, charge enable GPIO 215 active low),
+ * SM5504 MUIC at 0x14 (SDA GPIO 82, SCL GPIO 81)
+ */
+/ {
+	i2c-charger {
+		compatible = "i2c-gpio";
+		sda-gpios = <&gpio 159 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>;
+		scl-gpios = <&gpio 160 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>;
+		i2c-gpio,delay-us = <10>;
+		#address-cells = <1>;
+		#size-cells = <0>;
+
+		charger: charger@49 {
+			compatible = "siliconmitus,sm5701-charger";
+			reg = <0x49>;
+			chgen-gpios = <&gpio 215 GPIO_ACTIVE_LOW>;
+			sm,muic = <&muic>;
+		};
+	};
+
+	i2c-muic {
+		compatible = "i2c-gpio";
+		sda-gpios = <&gpio 82 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>;
+		scl-gpios = <&gpio 81 (GPIO_ACTIVE_HIGH | GPIO_OPEN_DRAIN)>;
+		i2c-gpio,delay-us = <10>;
+		#address-cells = <1>;
+		#size-cells = <0>;
+
+		muic: muic@14 {
+			compatible = "siliconmitus,sm5504";
+			reg = <0x14>;
+		};
+	};
+};
+
 &fgu {
 	monitored-battery = <&bat>;
 	sprd,rsense = <199 200>;	/* sense resistor, real and specified (0.1 mOhm) */

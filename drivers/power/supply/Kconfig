@@ -969,6 +969,14 @@ config CHARGER_SC2731
 	  Say Y here to enable support for battery charging with SC2731
 	  PMIC chips.
 
+config CHARGER_SM5701
+	tristate "Silicon Mitus SM5701 charger"
+	depends on I2C
+	help
+	  Charger of the Silicon Mitus SM5701 (Samsung Galaxy Tab A 7.0,
+	  SM-T280), with the input and charge currents picked from the cable
+	  type an SM5504 MUIC reports.
+
 config BATTERY_SC2723_FGU
 	tristate "Spreadtrum SC2723 PMIC fuel gauge"
 	depends on ARCH_SPRD || COMPILE_TEST
