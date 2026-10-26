@@ -153,6 +153,14 @@
 			reg-names = "adi", "pmic";
 		};
 
+		/* Fuel gauge of the SC2723 PMIC (ADI window 0x500) */
+		fgu: fuel-gauge@40038500 {
+			compatible = "sprd,sc2723-fgu";
+			reg = <0x40030000 0x1000>, <0x40038000 0x1000>;
+			reg-names = "adi", "pmic";
+			status = "disabled";
+		};
+
 		/* Panel brightness: DCS commands through the DSI host (DesignWare 1.21a) */
 		backlight@21800000 {
 			compatible = "sprd,sc8830-dsi-backlight";
