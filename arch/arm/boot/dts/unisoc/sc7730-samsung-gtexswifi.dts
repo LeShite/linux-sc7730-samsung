@@ -133,6 +133,16 @@
 	};
 };
 
+&usbphy {
+	vdd-supply = <&vddusb>;
+	sprd,tune-value = <0x4407ae33>;	/* the board's tune_value */
+	status = "okay";
+};
+
+&usb {
+	status = "okay";
+};
+
 &fgu {
 	monitored-battery = <&bat>;
 	sprd,rsense = <199 200>;	/* sense resistor, real and specified (0.1 mOhm) */
@@ -165,6 +175,15 @@
 		regulator-name = "vddsim2";
 		regulator-min-microvolt = <3000000>;
 		regulator-max-microvolt = <3000000>;
+	};
+
+	/* USB PHY, 3.3 V as the vendor's usb_ldo_switch() */
+	vddusb: vddusb {
+		sprd,pd = <0x814 0x100>;
+		sprd,trim = <0x83c 0xff>;
+		regulator-name = "vddusb";
+		regulator-min-microvolt = <3300000>;
+		regulator-max-microvolt = <3300000>;
 	};
 
 	/* Marlin: download/core DC-DC, its voltage as the bootloader left it (the vendor asks 1.6 V) */

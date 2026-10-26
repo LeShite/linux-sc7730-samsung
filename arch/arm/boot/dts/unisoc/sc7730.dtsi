@@ -175,6 +175,25 @@
 			reg-names = "adi", "pmic";
 		};
 
+		/* USB: DesignWare HS OTG behind the SC8830 USB 2.0 PHY */
+		usbphy: usb-phy@71303000 {
+			compatible = "sprd,sc8830-usb-phy";
+			reg = <0x402e0000 0x100>, <0x20d00000 0x10>, <0x71303000 0x4>;
+			reg-names = "aon", "ahb", "tune";
+			#phy-cells = <0>;
+			status = "disabled";
+		};
+
+		usb: usb@20200000 {
+			compatible = "snps,dwc2";
+			reg = <0x20200000 0x1000>;
+			interrupts = <GIC_SPI 55 IRQ_TYPE_LEVEL_HIGH>;
+			phys = <&usbphy>;
+			phy-names = "usb2-phy";
+			dr_mode = "peripheral";
+			status = "disabled";
+		};
+
 		/* Fuel gauge of the SC2723 PMIC (ADI window 0x500) */
 		fgu: fuel-gauge@40038500 {
 			compatible = "sprd,sc2723-fgu";
