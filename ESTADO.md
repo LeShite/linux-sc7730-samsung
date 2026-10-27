@@ -1058,3 +1058,23 @@ hay que dárselo al AP (REG_AON_APB_VBC_CTRL, AP_WPROT_EN b6).
 - **sc2331_fw.bin** (661564 B): ARM crudo sin cabecera visible (tabla de vectores en 0, punteros 0x0005xxxx); calibración: connectivity_calibration.ini -> nvbuf (magic) por start_calibration. FALTA: dirección de carga, formato exacto de las tramas por SDIO (¿mismo BSL HDLC?) -> hay que terminar de leer `download` o capturarlo en TWRP (kernel Samsung, printk "sprd_download_sdio_write size") o usar el programa original allí.
 - **Plan por pasos:** (A) driver `sprd-marlin-sdio` mínimo en 6.18: función SDIO, lectura de 0x840/0x841/longitudes, canal 12 por IRQ GPIO, escritura canal 3; (B) reproducir la descarga de sc2331_fw.bin y ver respuesta; (C) portar sc2331/ wlan_* a cfg80211 de 6.18 (netdev, wiphy, scan/connect, cfg80211_ops nuevas); (D) wpa_supplicant en Batocera; (E) BT (aparte).
 - Riesgos: sin la descarga del firmware (B) no hay wlan; (C) es lo más grande (~7k líneas de API 3.10 a 6.18).
+
+## v63 — transporte SDIO del Marlin (fase 3, pasos 1-2 en curso) (26 oct, 20:50), compilado, SIN flashear
+- tag v63-marlin-sdio, patches/0039, out/boot-gtex-v63.img, build-72.log. drivers/misc/sprd-marlin-sdio.c (sdio_driver 0000:2331): habilita función 1, bloque 512, estado de canales (func0 0x840/0x841, longitudes 0x800+4n),
+  IRQ de datos GPIO 45 (DT: data-irq-gpios en el nodo marlin; wake ack 148, wake out 46, io_ready 84 aún sin usar), /dev/marlin: write = [canal][datos]; read = [canal][datos] del primer canal 8-15 con datos (5 s); sysfs status (…/virtual/misc/marlin/status).
+- Gpios del vendor (sprd-marlin en el DTS gtexswifi): 0=148 wake_ack, 1=45 data_irq, 2=46 wake_out, 3=84 io_ready, 4=230 reset.
+- Experimento previsto (sin reflashear, por ssh): ver status tras el arranque; intentar leer canal 12 (¿manda algo el FDL1 solo?); probar la trama BSL (CONNECT/START_DATA/...) por el canal 3 con sc2331_fw.bin y leer la respuesta del 12. Dirección de carga a deducir (vectores en 0).
+
+## v63 PROBADA — ¡FIRMWARE sc2331_fw.bin CARGADO POR SDIO! (26 oct, 21:40) — Wi-Fi fase 3, pasos 1 y 2
+- v63 flasheada: `sprd-marlin-sdio mmc2:8800:1: Marlin SDIO function 1 enabled, /dev/marlin ready, irq 36`. /sys/devices/virtual/misc/marlin/status lista canales (canal 3 = ventana de escritura, 64 bytes al arrancar).
+- **Protocolo de descarga por SDIO (sacado de bin/download desensamblado, Thumb en scratchpad/download.S; funciones 0x27e0 constructor de tramas, 0x2bf8 START, 0x3458 MIDST, 0x1ac0 bucle de imagen):**
+  tramas del modo SDIO (NO HDLC): cabecera de 8 bytes = 4 halfwords little-endian h0..h3: h0 = longitud, h1 = tipo (MIDST: tipo en el byte bajo y bits 16-23 de la longitud en el alto),
+  h2 = checksum del payload, h3 = checksum de los 6 primeros bytes; checksum = suma de complemento a uno de 16 bits (~sum), byte impar final sumado tal cual. Escritura por el canal 3, respuestas por el 12 (6 bytes `00 80 00 00 ff 7f` = ACK).
+  * START: h0=8, h1=1, h2=csum(payload), payload = BE32 dirección + BE32 tamaño redondeado (0x100000, 0xC0000); trama de 16 bytes.
+  * MIDST: cabecera h0=total&0xffff, h1=((total>>16)&0xff)<<8|2, h2=0 + 0x20000 bytes de datos (la ventana del canal 3 pasa a 131080 = 0x20008 tras el START); relleno 0xff; 6 bloques de 128 KB.
+  * END: h0=4, h1=3, h2=0xffff + 4 bytes cero (12 bytes). **Tras el END el firmware arranca solo: NO hay EXEC** (el EXEC que probé no fue consumido; la ventana volvió a 64 bytes y sigue ocupada).
+  * Dirección de carga del firmware 0x100000 (tabla en .data de bin/download: fdl 0x80000000/0x2000, fw 0x100000/0xC0000).
+- **Resultado:** START, 6 MIDST y END recibieron ACK (probado desde un estado limpio justo tras el arranque; si antes se manda basura al canal 3 el chip deja de contestar hasta reiniciar). Scripts: tools/marlin/bsl.py (/dev/marlin) y fwload.py.
+- **Siguiente:** (a) comprobar si el firmware principal está vivo: sincronización por GPIO 84 (io_ready, dos flancos), wake 46/148 (esos pines no están en modo GPIO en nuestro kernel: dmsk=0; hay que configurarlos), canales 8/9/14 y 10 (sync); (b) calibración ("start_calibration", escritura de 4096 bytes de nvbuf al canal 0 y lectura de la respuesta del 12, 2001 intentos de 1 ms);
+  (c) portar drivers/net/wireless/sc2331 (wlan_core.c usa sdio_dev_write/read, canales 8/9) a 6.18 -> wlan0.
+- OJO: la descarga debe hacerse una sola vez por arranque, justo después de que aparezca /dev/marlin (~30 s), y sin mandar nada antes al canal 3.
