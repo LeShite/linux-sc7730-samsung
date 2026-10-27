@@ -91,6 +91,8 @@ struct sc2331 {
 	u8 *txbuf;
 	u8 *rxbuf;
 	u32 tx_cnt;
+	int rx_dbg, tx_dbg;
+	u32 pkt_seq;			/* running number of every frame sent, in its 34-byte gap */
 
 	struct mutex cmd_lock;
 	struct completion rsp_done;
@@ -288,6 +290,8 @@ static void evt_disconnect(struct sc2331 *sc, const u8 *p, int len)
 
 static void rx_event(struct sc2331 *sc, u8 evt, const u8 *p, int len)
 {
+	if (evt != EVT_REPORT_SCAN_FRAME)
+		dev_info(sc->wiphy->dev.parent, "event %u len %d: %*ph\n", evt, len, min(len, 32), p);
 	switch (evt) {
 	case EVT_CONNECT:
 		evt_connect(sc, p, len);
@@ -337,12 +341,16 @@ static void rx_parse(struct sc2331 *sc, const u8 *buf, int len)
 			break;
 		switch (type) {
 		case MSG_PKT:
+			if (sc->rx_dbg++ < 20)
+				dev_info(sc->wiphy->dev.parent, "rx frame off %u len %d: %*ph\n", h->subtype, dlen,
+					 min(dlen, 24), data + h->subtype);
 			if (h->subtype <= dlen)
 				rx_frame(sc, data + h->subtype, dlen - h->subtype);
 			break;
 		case MSG_RSP:
 			if (sc->rsp_wait && h->subtype == sc->rsp_subtype) {
 				sc->rsp_code = dlen >= 4 ? (s32)get_unaligned_le32(data) : 0;
+				dev_dbg(sc->wiphy->dev.parent, "response %u: code %d (%d bytes)\n", h->subtype, sc->rsp_code, dlen);
 				complete(&sc->rsp_done);
 			}
 			break;
@@ -439,10 +447,12 @@ static bool sc_tx(struct sc2331 *sc)
 			sc->pktq_len--;
 			took_pkt = true;
 		}
+		if ((it->hdr.type_vif & 0x7f) == MSG_PKT && sc->tx_dbg++ < 20)
+			dev_info(sc->wiphy->dev.parent, "tx frame %u bytes: %*ph\n", it->len, min_t(int, it->len, 24), it->data);
 		memcpy(sc->txbuf + pos, &it->hdr, sizeof(it->hdr));
 		memcpy(&bh->msg[num], &it->hdr, sizeof(it->hdr));
 		if ((it->hdr.type_vif & 0x7f) == MSG_PKT) {
-			put_unaligned_le32(sc->tx_cnt + num, sc->txbuf + pos + sizeof(it->hdr));
+			put_unaligned_le32(sc->pkt_seq++, sc->txbuf + pos + sizeof(it->hdr));
 			memset(sc->txbuf + pos + sizeof(it->hdr) + 4, 0, PKT_EXTRA - 4);
 			memcpy(sc->txbuf + pos + sizeof(it->hdr) + PKT_EXTRA, it->data, it->len);
 		} else if (it->len) {
