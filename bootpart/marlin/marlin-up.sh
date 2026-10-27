@@ -10,5 +10,13 @@ L=/boot/marlin/marlin.log
 	cd /boot/marlin && python3 -u marlin_up.py || { echo "marlin_up fallo"; exit 1; }
 	# firmware running and calibrated: register wlan0 (kernel sprd-sc2331-wlan)
 	echo 1 >/sys/devices/virtual/misc/marlin/wlan && echo "wlan0 registrada"
+	# Batocera's connman started before wlan0 existed and left WiFi switched off: switch it on now,
+	# if the user has WiFi enabled in the Batocera menu (wifi.enabled=1 in batocera.conf)
+	if [ "$(batocera-settings-get -f /userdata/system/batocera.conf wifi.enabled 2>/dev/null)" = "1" ]; then
+		for i in $(seq 1 20); do connmanctl state >/dev/null 2>&1 && break; sleep 1; done
+		connmanctl enable wifi 2>&1
+		connmanctl scan wifi 2>&1
+		echo "connman: WiFi activado"
+	fi
 	echo "== fin rc=$? up=$(cut -d' ' -f1 /proc/uptime)"
 } >>"$L" 2>&1
