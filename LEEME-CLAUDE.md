@@ -70,3 +70,8 @@ Contexto y reglas: `LEEME-CODEX.md`.
   BOX86_NODYNAREC=0x61700000-0x619c7000 porque el dinarec miscompila filesystem_stdio.so -> SIGILL). Con eso Portal carga server.so/GameUI.so
   y entra al bucle de dibujado; pendientes: shaders GLSL de materiales (`vertexlit_and_unlit_generic_ps20b`, `lightmappedgeneric_ps20b`,
   MRT gl_FragData) no compilan en GLES2/lima, pantalla negra; velocidad por ver.
+- 2026-10-27 (11:10) — Claude: Portal ya sale en Ports -> Portal (gamelist.xml + Portal.sh), arranca desde el menu con ES normal (tras reinicio; un ES
+  reiniciado a mano por ssh NO suelta el DRM y RetroArch falla con "Error when switching mode"). El motor llega a "Console initialized" (~3 min), sin crash,
+  pantalla oscura: 61 shaders no compilan (54 lightmappedgeneric_ps20b, 7 vertexlit_and_unlit_generic_ps20b) en GLES2/lima. Siguiente paso: ver el error de
+  compilacion con LIBGL_LOGSHADERERROR=1 y adaptar el convertidor de shaders de gl4es (limites de la Mali-400: sin loops dinamicos, 512 instr. en el GP).
+  Nota: Box86 renombra el proceso a "hl2_linux": usar `pgrep -x hl2_linux`, no `-f box86`.

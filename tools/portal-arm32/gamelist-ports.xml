@@ -1,0 +1,13 @@
+<?xml version="1.0"?>
+<gameList>
+	<game>
+		<path>./Portal.sh</path>
+		<name>Portal</name>
+		<desc>Portal (Valve, 2007) para Linux, ejecutado con Box86 + GL4ES. Experimental en la SM-T280: arranca el motor, pero los shaders de materiales aun no compilan (pantalla casi en blanco) y la velocidad sera muy baja. Requiere la carpeta Portal_Linux en /userdata/roms/ports/.data/.</desc>
+		<developer>Valve</developer>
+		<publisher>Valve</publisher>
+		<genre>Puzzle-Platform</genre>
+		<players>1</players>
+		<releasedate>20071010T000000</releasedate>
+	</game>
+</gameList>

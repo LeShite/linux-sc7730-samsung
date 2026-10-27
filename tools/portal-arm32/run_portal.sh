@@ -89,6 +89,14 @@ if [[ -x "$ROTATION_HOOK" ]]; then
 	trap '"$ROTATION_HOOK" stop || true' EXIT
 fi
 
+# Source keeps a single-instance lock in /tmp; a game that was killed leaves it behind and the next start dies with
+# "fcntl(3) for /tmp/source_engine_*.lock failed". Drop it unless an instance is really running.
+if ! pgrep -f '[b]ox86.*hl2_linux' >/dev/null 2>&1; then
+	rm -f /tmp/source_engine_*.lock
+fi
+# skip the intro videos by default (bink decoding is far too slow here); PORTAL_EXTRA_ARGS= (empty) to keep them
+PORTAL_EXTRA_ARGS=${PORTAL_EXTRA_ARGS--novid}
+
 mkdir -p "$LOG_DIR"
 LOG="$LOG_DIR/portal-box86-$(date +%Y%m%d-%H%M%S).log"
 cd "$GAME_ROOT" || exit 2
