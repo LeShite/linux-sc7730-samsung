@@ -1026,3 +1026,23 @@ hay que dárselo al AP (REG_AON_APB_VBC_CTRL, AP_WPROT_EN b6).
 - (26 oct, 04:20) Corrección del usuario: el valor correcto era 1.5 kHz, no 1.2 (se había dicho mal). Revertido a 1500 Hz, Q 1, -6 dB en overlay/audiofilter/speaker.dsp, make-overlay.py y la tablet. Es el EQ de Samsung tal cual; sigue siendo solo para juegos de RetroArch.
 - Repo del proyecto: git local en ~/batocera-t280 (rama main, 1 commit; .gitignore excluye src/, android-fw/, backup/, twrp/, info/, imágenes y logs). SIN subir: falta destino en GitHub y acceso SSH (la llave id_ed25519 da 'Permission denied (publickey)' en github.com).
 - (26 oct, 05:10) SUBIDO a github.com/LeShite/linux-sc7730-samsung: rama master del kernel + tags v11..v60, y el proyecto (scripts, bootpart, overlay, parches, ESTADO.md) en la rama sm-t280-project (desde 'main' local del repo ~/batocera-t280). Para actualizar: git push origin main:sm-t280-project (proyecto) y git push (kernel, en src/linux-6.18.58).
+
+## v61 — Wi-Fi fase 2: cargador FDL1 por UART0 en master (26 oct, 05:40), compilado, SIN flashear
+- Rama wifi-v61 del kernel = master (v60) + cherry-pick del commit de Codex 29ba5bcfc (drivers/misc/sprd-sc2331-marlin.c, UART0 + serdev en DT, sdhci con "no-sdio" hasta que el FDL arranque).
+  Conflicto único en drivers/misc/Makefile (se conservan ambas líneas). tag v61-marlin-fdl, patches/0037, out/boot-gtex-v61.img, build-70.log; build-kernel.sh exige SERIAL_SPRD, SERIAL_DEV_BUS, FW_LOADER, SPRD_SC2331_MARLIN.
+- sc2331_fdl.bin (7288 bytes) va EMBEBIDO en el kernel (CONFIG_EXTRA_FIRMWARE desde android-fw/sys/tree/etc/firmware): no hace falta rootfs.
+- Qué buscar tras flashear (dmesg): "UART0 configured for 115200 baud", "BootROM version response ... 'SPRD3'", "uploaded and executed FDL1 (7288 bytes at 80000000)", "SDIO1 rescan requested", y luego "mmc2: new ... SDIO card".
+  Si no hay respuesta BootROM: revisar reloj/mux de UART0 (init-regs 0x71200064 y 0x71300000 b13) y polaridad del reset (GPIO 230). Si el FDL arranca pero no hay tarjeta SDIO: la dirección de carga 0x80000000 está inferida, no confirmada.
+- Siguiente (fase 3): portar el transporte SDIO del vendor (drivers/misc/sdiodev) para descargar sc2331_fw.bin + calibración, luego sprdwl (cfg80211) -> wlan0. Es la parte grande (~12k líneas del 3.10).
+
+## v61 probada y v62 (26 oct, 19:50)
+- **v61 en la tablet:** UART0 OK (ttyS0, 115200); el BootROM contesta "535052443300" (SPRD3) a 0.97 s; **FDL1 subido y ejecutado (7288 bytes en 0x80000000)** — la dirección inferida sirvió (al menos el EXEC fue aceptado).
+- Problemas: (1) todo el proceso tardó **37 s dentro del probe** y retrasó el arranque (init arrancó a 38.6 s); sin medir qué tramo; (2) tras "SDIO1 rescan requested" NO apareció ninguna tarjeta SDIO ni error:
+  el núcleo MMC escanea solo UNA vez los hosts non-removable (host->rescan_entered), mmc_detect_change no hace nada.
+- **v62** (tag v62-marlin-async, patches/0038, out/boot-gtex-v62.img, build-71.log): rescan_entered = 0 antes de mmc_detect_change; la carga del FDL pasa a un work (no frena el arranque);
+  trazas de tiempo (sync / connect / primer bloque). Qué mirar: "sync N ms", "connect acked", "first chunk acked", y si aparece "mmc2: new ... SDIO card" tras el rescan.
+- Si el SDIO no contesta ni así: el FDL1 podría necesitar tiempo (esperar ~1-2 s antes del rescan), o activar SDIO con un comando propio del FDL; revisar bin/download de Samsung (android-fw/sys/tree/bin/download).
+- **v62 PROBADA (26 oct, 19:45): ¡EL CHIP WI-FI APARECE EN SDIO!** `mmc2: new high speed SDIO card at address 8800`, SDIO_ID=0000:2331 (función 1, clase 0), tipo SDIO. El arranque ya no se retrasa (Run /init a 2.4 s).
+  Tiempos: sync 540 ms, connect 559 ms, primer bloque 640 ms; el FDL1 completo termina a los ~38 s (de los 14 bloques restantes + EXEC; sin medir cuál tramo; la tarjeta SDIO sale 170 ms después del rescan).
+  Pendiente de optimizar: esos ~37 s (la tarjeta tarda 38 s en estar lista tras cada arranque).
+- **Siguiente (fase 3):** con la tarjeta ya enumerada, portar el transporte SDIO del vendor (drivers/misc/sdiodev: canales 3 escribir/12 leer, carga de sc2331_fw.bin y connectivity_calibration.ini por /dev/download) y luego sprdwl (cfg80211) -> wlan0, wpa_supplicant. Fuentes: src/kernel-stock-3.10/drivers/misc/sdiodev y drivers/net/wireless/sprdwl.
