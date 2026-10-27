@@ -24,6 +24,7 @@
 #include <linux/module.h>
 #include <linux/mutex.h>
 #include <linux/of.h>
+#include <linux/etherdevice.h>
 #include <linux/slab.h>
 #include <linux/sprd-marlin-sdio.h>
 #include <linux/uaccess.h>
@@ -40,6 +41,7 @@
 struct marlin_sdio {
 	struct sdio_func *func;
 	struct gpio_desc *data_irq;
+	struct gpio_desc *wake_out, *wake_ack;	/* CP wake request (46) and its answer (148) */
 	int irq;
 	struct mutex lock;
 	wait_queue_head_t wait;
@@ -121,6 +123,32 @@ int marlin_sdio_chn_write(struct marlin_sdio *m, unsigned int chn, const void *b
 	ret = sdio_memcpy_toio(m->func, chn, (void *)buf, len);
 	sdio_release_host(m->func);
 	return ret;
+}
+
+/*
+ * Sleep handshake of the vendor's sdio_dev.c: the chip sleeps when idle. To talk to it the host
+ * raises wake_out; the chip answers by raising wake_ack and stays awake while wake_out is high.
+ * It raises data_irq itself when it has something to send.
+ */
+int marlin_sdio_wake(struct marlin_sdio *m)
+{
+	int i;
+
+	if (!m->wake_out || !m->wake_ack)
+		return 0;
+	gpiod_set_value(m->wake_out, 1);
+	for (i = 0; i < 400; i++) {			/* up to ~100 ms */
+		if (gpiod_get_value(m->wake_ack))
+			return 0;
+		usleep_range(200, 300);
+	}
+	return -ETIMEDOUT;
+}
+
+void marlin_sdio_sleep(struct marlin_sdio *m)
+{
+	if (m->wake_out)
+		gpiod_set_value(m->wake_out, 0);
 }
 
 void marlin_sdio_set_irq_cb(struct marlin_sdio *m, void (*cb)(void *), void *data)
@@ -241,15 +269,23 @@ static DEVICE_ATTR_RO(status);
 static ssize_t wlan_store(struct device *dev, struct device_attribute *attr, const char *buf, size_t n)
 {
 	struct marlin_sdio *m = marlin;
-	bool on;
-	int ret = kstrtobool(buf, &on);
+	u8 mac[ETH_ALEN];
+	bool on, have_mac = false;
+	char word[4] = { 0 };
+	int ret;
 
-	if (ret)
-		return ret;
+	if (sscanf(buf, "%3s", word) != 1 || kstrtobool(word, &on))
+		return -EINVAL;
+	if (on && strchr(buf, ' ')) {
+		const char *p = strchr(buf, ' ') + 1;
+
+		if (sscanf(p, "%hhx:%hhx:%hhx:%hhx:%hhx:%hhx", &mac[0], &mac[1], &mac[2], &mac[3], &mac[4], &mac[5]) == 6)
+			have_mac = true;
+	}
 	if (!m)
 		return -ENODEV;
 	if (on) {
-		ret = sc2331_wlan_start(m);
+		ret = sc2331_wlan_start(m, have_mac ? mac : NULL);
 		return ret ?: n;
 	}
 	sc2331_wlan_stop();
@@ -291,6 +327,11 @@ static int marlin_probe(struct sdio_func *func, const struct sdio_device_id *id)
 		m->data_irq = fwnode_gpiod_get_index(of_fwnode_handle(np), "data-irq", 0, GPIOD_IN, "marlin-irq");
 		if (IS_ERR(m->data_irq))
 			m->data_irq = NULL;
+		/* held high (chip awake) until the WiFi driver takes over the sleep policy */
+		m->wake_out = fwnode_gpiod_get_index(of_fwnode_handle(np), "wake-out", 0, GPIOD_OUT_HIGH, "marlin-wake-out");
+		m->wake_ack = fwnode_gpiod_get_index(of_fwnode_handle(np), "wake-ack", 0, GPIOD_IN, "marlin-wake-ack");
+		if (IS_ERR(m->wake_out) || IS_ERR(m->wake_ack))
+			m->wake_out = m->wake_ack = NULL;
 		of_node_put(np);
 	}
 	if (m->data_irq) {

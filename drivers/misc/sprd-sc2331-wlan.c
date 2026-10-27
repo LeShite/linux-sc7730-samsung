@@ -82,8 +82,10 @@ struct sc2331 {
 	struct net_device *ndev;
 	struct task_struct *task;
 	wait_queue_head_t wq;
-	bool kick;
+	bool kick, irq_pending;
 	bool opened;
+	bool awake;			/* chip held awake through wake_out */
+	unsigned long last_active;
 
 	spinlock_t txlock;
 	struct list_head cmdq, pktq;
@@ -91,7 +93,6 @@ struct sc2331 {
 	u8 *txbuf;
 	u8 *rxbuf;
 	u32 tx_cnt;
-	int rx_dbg, tx_dbg;
 	u32 pkt_seq;			/* running number of every frame sent, in its 34-byte gap */
 
 	struct mutex cmd_lock;
@@ -118,7 +119,10 @@ static void kick(struct sc2331 *sc)
 
 static void irq_cb(void *data)
 {
-	kick(data);
+	struct sc2331 *sc = data;
+
+	sc->irq_pending = true;
+	kick(sc);
 }
 
 static int queue_msg(struct sc2331 *sc, u8 type, u8 subtype, const void *data, u32 len, bool is_cmd)
@@ -260,6 +264,7 @@ static void evt_connect(struct sc2331 *sc, const u8 *p, int len)
 	if (resp_len > left - 2)
 		resp_len = left - 2;
 	memcpy(sc->bssid, bssid, ETH_ALEN);
+	dev_info(sc->wiphy->dev.parent, "connected to %pM\n", bssid);
 	sc->connecting = false;
 	sc->connected = true;
 	cfg80211_connect_result(sc->ndev, bssid, req, req_len, resp, resp_len, WLAN_STATUS_SUCCESS, GFP_KERNEL);
@@ -277,6 +282,9 @@ static void evt_disconnect(struct sc2331 *sc, const u8 *p, int len)
 {
 	u16 reason = len >= 2 ? get_unaligned_le16(p) : 0;
 
+	if (!sc->connecting && !sc->connected)
+		return;				/* we disconnected ourselves already */
+	dev_info(sc->wiphy->dev.parent, "disconnected (reason %u)\n", reason);
 	if (sc->connecting) {
 		sc->connecting = false;
 		cfg80211_connect_result(sc->ndev, sc->bssid, NULL, 0, NULL, 0, WLAN_STATUS_UNSPECIFIED_FAILURE,
@@ -290,8 +298,10 @@ static void evt_disconnect(struct sc2331 *sc, const u8 *p, int len)
 
 static void rx_event(struct sc2331 *sc, u8 evt, const u8 *p, int len)
 {
-	if (evt != EVT_REPORT_SCAN_FRAME)
-		dev_info(sc->wiphy->dev.parent, "event %u len %d: %*ph\n", evt, len, min(len, 32), p);
+	if (evt == 144)				/* firmware version string, right after the firmware starts */
+		dev_info(sc->wiphy->dev.parent, "firmware %.*s\n", len > 4 ? len - 4 : 0, p + 4);
+	else if (evt != EVT_REPORT_SCAN_FRAME)
+		dev_dbg(sc->wiphy->dev.parent, "event %u len %d: %*ph\n", evt, len, min(len, 32), p);
 	switch (evt) {
 	case EVT_CONNECT:
 		evt_connect(sc, p, len);
@@ -341,9 +351,6 @@ static void rx_parse(struct sc2331 *sc, const u8 *buf, int len)
 			break;
 		switch (type) {
 		case MSG_PKT:
-			if (sc->rx_dbg++ < 20)
-				dev_info(sc->wiphy->dev.parent, "rx frame off %u len %d: %*ph\n", h->subtype, dlen,
-					 min(dlen, 24), data + h->subtype);
 			if (h->subtype <= dlen)
 				rx_frame(sc, data + h->subtype, dlen - h->subtype);
 			break;
@@ -447,8 +454,6 @@ static bool sc_tx(struct sc2331 *sc)
 			sc->pktq_len--;
 			took_pkt = true;
 		}
-		if ((it->hdr.type_vif & 0x7f) == MSG_PKT && sc->tx_dbg++ < 20)
-			dev_info(sc->wiphy->dev.parent, "tx frame %u bytes: %*ph\n", it->len, min_t(int, it->len, 24), it->data);
 		memcpy(sc->txbuf + pos, &it->hdr, sizeof(it->hdr));
 		memcpy(&bh->msg[num], &it->hdr, sizeof(it->hdr));
 		if ((it->hdr.type_vif & 0x7f) == MSG_PKT) {
@@ -491,19 +496,57 @@ static bool sc_tx(struct sc2331 *sc)
 	return true;
 }
 
+static bool tx_pending(struct sc2331 *sc)
+{
+	unsigned long flags;
+	bool p;
+
+	spin_lock_irqsave(&sc->txlock, flags);
+	p = !list_empty(&sc->cmdq) || !list_empty(&sc->pktq);
+	spin_unlock_irqrestore(&sc->txlock, flags);
+	return p;
+}
+
+/* module parameter: ms of silence before the chip may sleep; 0 keeps it awake all the time */
+static unsigned int idle_sleep_ms = 500;
+module_param(idle_sleep_ms, uint, 0644);
+
 static int sc_thread(void *arg)
 {
 	struct sc2331 *sc = arg;
 
+	sc->awake = true;			/* wake_out is held high until the first idle period */
+	sc->last_active = jiffies;
 	while (!kthread_should_stop()) {
 		bool did = false;
 
 		sc->kick = false;
-		did |= sc_rx(sc);
-		did |= sc_tx(sc);
+		if (!sc->awake) {			/* a data interrupt or something to send: wake the chip first */
+			if (tx_pending(sc) || sc->irq_pending) {
+				if (marlin_sdio_wake(sc->m)) {
+					dev_warn(sc->wiphy->dev.parent, "chip did not wake up\n");
+					msleep(20);
+					continue;
+				}
+				sc->awake = true;
+				sc->last_active = jiffies;
+			}
+		}
+		sc->irq_pending = false;
+		if (sc->awake) {
+			did |= sc_rx(sc);
+			did |= sc_tx(sc);
+			if (did) {
+				sc->last_active = jiffies;
+			} else if (idle_sleep_ms && sc->opened &&
+				   time_after(jiffies, sc->last_active + msecs_to_jiffies(idle_sleep_ms))) {
+				marlin_sdio_sleep(sc->m);
+				sc->awake = false;
+			}
+		}
 		if (!did)
-			wait_event_interruptible_timeout(sc->wq, sc->kick || kthread_should_stop(),
-							 msecs_to_jiffies(sc->opened ? 10 : 100));
+			wait_event_interruptible_timeout(sc->wq, sc->kick || sc->irq_pending || kthread_should_stop(),
+							 msecs_to_jiffies(sc->awake ? 10 : 1000));
 	}
 	return 0;
 }
@@ -533,8 +576,14 @@ static int sc_stop(struct net_device *ndev)
 {
 	struct sc2331 *sc = *(struct sc2331 **)netdev_priv(ndev);
 	u8 mode = 1;
+	__le16 reason = cpu_to_le16(WLAN_REASON_DEAUTH_LEAVING);
 
 	netif_stop_queue(ndev);
+	if (sc->connected || sc->connecting) {
+		sc_cmd(sc, CMD_SET_DISCONNECT, &reason, sizeof(reason), CMD_TIMEOUT_MS);
+		sc->connected = sc->connecting = false;
+	}
+	netif_carrier_off(ndev);
 	sc_cmd(sc, CMD_SET_DEV_CLOSE, &mode, 1, CMD_TIMEOUT_MS);
 	sc->opened = false;
 	scan_finish(sc, true);
@@ -703,8 +752,18 @@ static int sc_disconnect(struct wiphy *wiphy, struct net_device *ndev, u16 reaso
 {
 	struct sc2331 *sc = wiphy_priv(wiphy);
 	__le16 r = cpu_to_le16(reason);
+	bool was_connected = sc->connected, was_connecting = sc->connecting;
+	int ret;
 
-	return sc_cmd(sc, CMD_SET_DISCONNECT, &r, sizeof(r), CMD_TIMEOUT_MS);
+	ret = sc_cmd(sc, CMD_SET_DISCONNECT, &r, sizeof(r), CMD_TIMEOUT_MS);
+	/* the firmware may stay silent: keep cfg80211's idea of the link in step with ours */
+	sc->connected = sc->connecting = false;
+	netif_carrier_off(ndev);
+	if (was_connecting)
+		cfg80211_connect_result(ndev, sc->bssid, NULL, 0, NULL, 0, WLAN_STATUS_UNSPECIFIED_FAILURE, GFP_KERNEL);
+	else if (was_connected)
+		cfg80211_disconnected(ndev, reason, NULL, 0, true, GFP_KERNEL);
+	return ret;
 }
 
 /*
@@ -743,8 +802,8 @@ static int sc_add_key(struct wiphy *wiphy, struct net_device *d, int link_id, u8
 	k->key_len = params->key_len;
 	memcpy(k->value, params->key, params->key_len);
 	ret = sc_cmd(sc, CMD_KEY_ADD, k, sizeof(*k) + params->key_len, CMD_TIMEOUT_MS);
-	dev_info(wiphy->dev.parent, "add_key idx %u pairwise %d cipher %#x len %d -> %d\n", idx, pairwise,
-		 params->cipher, params->key_len, ret);
+	dev_dbg(wiphy->dev.parent, "add_key idx %u pairwise %d cipher %#x len %d -> %d\n", idx, pairwise,
+		params->cipher, params->key_len, ret);
 	kfree(k);
 	return ret;
 }
@@ -823,6 +882,7 @@ void sc2331_wlan_stop(void)
 		return;
 	g_sc = NULL;
 	marlin_sdio_set_irq_cb(sc->m, NULL, NULL);
+	marlin_sdio_wake(sc->m);
 	if (sc->ndev)
 		unregister_netdev(sc->ndev);
 	kthread_stop(sc->task);
@@ -835,7 +895,7 @@ void sc2331_wlan_stop(void)
 }
 EXPORT_SYMBOL_GPL(sc2331_wlan_stop);
 
-int sc2331_wlan_start(struct marlin_sdio *m)
+int sc2331_wlan_start(struct marlin_sdio *m, const u8 *mac)
 {
 	struct device *dev = marlin_sdio_dev(m);
 	struct wiphy *wiphy;
@@ -892,7 +952,10 @@ int sc2331_wlan_start(struct marlin_sdio *m)
 	sc->wdev.iftype = NL80211_IFTYPE_STATION;
 	ndev->ieee80211_ptr = &sc->wdev;
 	SET_NETDEV_DEV(ndev, wiphy_dev(wiphy));
-	eth_hw_addr_random(ndev);
+	if (mac && is_valid_ether_addr(mac))
+		eth_hw_addr_set(ndev, mac);
+	else
+		eth_hw_addr_random(ndev);
 	ret = register_netdev(ndev);
 	if (ret)
 		goto err_netdev;

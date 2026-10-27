@@ -116,6 +116,9 @@
 		sdio-host = <&sdio1>;
 		/* vendor sprd-marlin gpios: 0 = wake ack (148), 1 = data irq (45), 2 = wake out (46) */
 		data-irq-gpios = <&gpio 45 GPIO_ACTIVE_HIGH>;
+		/* sleep handshake: raise 46 to wake the chip, it answers on 148 */
+		wake-out-gpios = <&gpio 46 GPIO_ACTIVE_HIGH>;
+		wake-ack-gpios = <&gpio 148 GPIO_ACTIVE_HIGH>;
 	};
 };
 
