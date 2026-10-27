@@ -24,3 +24,5 @@ __pycache__/
 *.xz
 /info/
 /bootpart/cores/
+/tools/portal-arm32/box86/
+/tools/portal-arm32/gl4es/

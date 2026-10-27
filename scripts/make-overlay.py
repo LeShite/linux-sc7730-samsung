@@ -66,7 +66,21 @@ def font(size):
     return ImageFont.truetype(FONT, size * SS)
 
 
-def draw_landscape(tp):
+# what each touch zone is called and coloured: the Xbox letters, or the N64's (RetroArch's parallel_n64 with
+# its "independent C buttons" option: south = A, west-code BTN_NORTH (left) = B, east = C-down, top = C-up,
+# L1 = C-left, R1 = C-right, L2 = Z, R2 = R, SELECT = L)
+LABELS_XBOX = {"BTN_SOUTH": ((76, 175, 80), "A"), "BTN_EAST": ((244, 67, 54), "B"),
+               "BTN_NORTH": ((33, 150, 243), "X"), "BTN_WEST": ((255, 193, 7), "Y"),
+               "BTN_SELECT": "SELECT", "BTN_START": "START", "BTN_MODE": "HOTKEY",
+               "BTN_TL": "L1", "BTN_TR": "R1", "ABS_Z": "L2", "ABS_RZ": "R2"}
+LABELS_N64 = {"BTN_SOUTH": ((33, 120, 243), "A"), "BTN_NORTH": ((76, 175, 80), "B"),
+              "BTN_EAST": ((255, 193, 7), "C\u2193"), "BTN_WEST": ((255, 193, 7), "C\u2191"),
+              "BTN_SELECT": "L", "BTN_START": "START", "BTN_MODE": "HOTKEY",
+              "BTN_TL": "C\u2190", "BTN_TR": "C\u2192", "ABS_Z": "Z", "ABS_RZ": "R"}
+
+
+def draw_landscape(tp, names=None):
+    names = names or LABELS_XBOX
     s = lambda v: int(round(v * SS))
     canvas = Image.new("RGBA", (s(W), s(H)), (0, 0, 0, 0))
 
@@ -113,22 +127,21 @@ def draw_landscape(tp):
     layer(dpad)
 
     # Xbox letters: X is left (BTN_NORTH code), Y is top (BTN_WEST code)
-    colors = {"BTN_SOUTH": ((76, 175, 80), "A"), "BTN_EAST": ((244, 67, 54), "B"),
-              "BTN_NORTH": ((33, 150, 243), "X"), "BTN_WEST": ((255, 193, 7), "Y")}
+    colors = {k: names[k] for k in ("BTN_SOUTH", "BTN_EAST", "BTN_NORTH", "BTN_WEST")}
     for code, (bx, by, br) in tp.BUTTONS.items():
         if code in colors:
             col, text = colors[code]
             # drawn a bit smaller than the touch zone so neighbours do not overlap
             layer(lambda d, bx=bx, by=by, br=br, col=col, text=text: circle(d, bx, by, br - 8, col, text, 64))
         else:
-            text = {"BTN_SELECT": "SELECT", "BTN_START": "START", "BTN_MODE": "HOTKEY"}[code]
+            text = names[{"BTN_SELECT": "BTN_SELECT", "BTN_START": "BTN_START", "BTN_MODE": "BTN_MODE"}[code]]
             layer(lambda d, bx=bx, by=by, text=text: pill(d, (bx - 62, by - 26, bx + 62, by + 26), text, 24))
 
     layer(lambda d: label(d, W / 2, 668, f"Mantén HOTKEY + START {tp.EXIT_HOLD:g} s para salir", 22,
                           fill=(255, 255, 255, 235)))
 
     for code, (x0, y0, x1, y1) in {**tp.SHOULDERS, **tp.TRIGGERS}.items():
-        text = {"BTN_TL": "L1", "BTN_TR": "R1", "ABS_Z": "L2", "ABS_RZ": "R2"}[code]
+        text = names[code]
         layer(lambda d, x0=x0, y0=y0, x1=x1, y1=y1, text=text:
               pill(d, (x0 + 14, y0 + 14, x1 - 14, y1 - 14), text, 40))
 
@@ -176,6 +189,13 @@ def main():
     (OUT / "retroarch").mkdir(exist_ok=True)
     panel.save(OUT / "gamepad.png")
     land.save(OUT / "gamepad-landscape.png")
+    land64 = draw_landscape(tp, LABELS_N64)
+    to_panel(land64).save(OUT / "gamepad-n64.png")
+    (OUT / "gamepad-n64.cfg").write_text(
+        'overlays = 1\n'
+        'overlay0_overlay = "gamepad-n64.png"\n'
+        'overlay0_full_screen = true\n'
+        'overlay0_descs = 0\n')
     (OUT / "gamepad.cfg").write_text(
         'overlays = 1\n'
         'overlay0_overlay = "gamepad.png"\n'
@@ -199,7 +219,10 @@ def main():
         extra = ""
         if name == "n64":	# no analog stick on the touch pad: the D-pad drives the N64 stick (core option alt-map: C buttons on the face buttons)
             extra = '# no analog stick on the touch pad: the D-pad drives the N64 stick\ninput_player1_analog_dpad_mode = "1"\n'
-        (OUT / "retroarch" / f"{name}.cfg").write_text(cfg + extra)
+        text = cfg + extra
+        if name == "n64":
+            text = text.replace("overlay/gamepad.cfg", "overlay/gamepad-n64.cfg")
+        (OUT / "retroarch" / f"{name}.cfg").write_text(text)
 
     # PipeWire's graph runs at 48 kHz by default while the apps mostly use 44.1: pin it to CD rate.
     # Drop-in for both places a user config may live ($HOME/.config and $XDG_CONFIG_HOME)
