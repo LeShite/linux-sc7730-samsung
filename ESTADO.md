@@ -1104,3 +1104,11 @@ hay que dárselo al AP (REG_AON_APB_VBC_CTRL, AP_WPROT_EN b6).
 - v64 flasheada. Arranque automático: marlin-up.sh termina a uptime 26.8 s con "wlan0 registrada" (FDL1 a 20 s, firmware+calibración ~6 s después). `wlan0` aparece (MAC aleatoria 3e:79:...), `ip link set wlan0 up` OK (SET_DEV_OPEN respondió),
   **`iw dev wlan0 scan` devuelve redes reales** con canal y señal (Share 2.4 -65 dBm, Totalplay, IZZI, INFINITUM, ARTCOUSTIX...; 28 BSS en el segundo escaneo). El formato de comandos del escaneo, la cola TX/RX y el análisis de eventos (REPORT_SCAN_FRAME ops 0/1) funcionan.
 - Pendiente: conectar a una red con wpa_supplicant (PMK por NL80211_ATTR_PMK), DHCP, tráfico de datos (TX con el relleno de 34 bytes por trama), MAC estable, wake_out/sleep, BT. Escaneo con SSID en blanco muestra algunas redes ocultas.
+
+## Wi-Fi: PRIMERA CONEXIÓN (26 oct, 21:15) — asocia, pero no pasa tráfico; v65 con trazas
+- Red del usuario `INFINITUM3B1A_2.4` (OJO: el nombre exacto con mayúsculas y "_2.4"; la clave se guarda solo en /tmp/wpa-test.conf de la tablet, NO en el repo).
+  Prueba: `wpa_supplicant -B -Dnl80211 -iwlan0 -c /tmp/wpa-test.conf -f /tmp/wpa.log -dd` -> **wpa_state=COMPLETED**, WPA2-PSK, CCMP/TKIP, canal 11, "Set PMK based on external data" (wpa_supplicant usa la oferta de handshake y pasa la PMK por NL80211_ATTR_PMK -> crypto.psk).
+- Problemas: (1) conecta y a los pocos segundos llega EVT_DISCONNECT con reason 196 (0xc4 = AP_DEAUTH) y se repite en bucle (conecta/desconecta); (2) el ping a 192.168.1.254/.1 con IP fija no recibe respuesta: ARP "FAILED". Sí entra tráfico (RX 24 paquetes: broadcast del router) y salen (TX 39, 7 descartados mientras estaba desconectado).
+  Hipótesis: handshake que falla por PMK/formato (el AP deauth tras el timeout), o trama TX mal formada; el contador seq de los 34 bytes era `tx_cnt+num` en vez de un contador corriente (corregido en v65).
+- No hay cliente DHCP suelto en la imagen (solo connmand); `ping -I` no funciona (SO_BINDTODEVICE). wake_out (GPIO 46) en alto a mano no cambió nada.
+- **v65** (tag v65-wlan-debug, patches/0041, out/boot-gtex-v65.img, build-74.log): seq corriente, y dev_info de cada evento (id, len, 32 bytes), de las 20 primeras tramas RX/TX. Qué mirar: motivo real del desconexión (eventos 129/131/132) y si las tramas TX salen bien (cabecera Ethernet).
