@@ -63,3 +63,10 @@ Contexto y reglas: `LEEME-CODEX.md`.
   pero togl sigue con `SDL failed to create GL compatibility profile (whichProfile=0)`: `SDL_GL_CreateContext` falla con el wrapper EGL de gl4es
   (trazas con muchos "function is no-op"; EGL_BAD_DISPLAY en eglQueryString; gl4es inicializó EGL en modo surfaceless, sin superficie de ventana GBM).
   Siguiente paso posible (largo): que SDL/KMSDRM le pase a gl4es el display GBM (parche del wrapper o SDL propio). Sin permiso del usuario no seguir.
+- 2026-10-27 — Claude: estado de Portal tras parchear gl4es/Box86/SDL (todo reproducible en `tools/portal-arm32/`):
+  `gl4es-t280.patch` (EGL wrapper con eglChooseConfig GLES2 + estado por contexto, GL_ARB_sync, GL_EXT_texture_sRGB_decode, perfil compat,
+  sampler3D->2D, glDeleteFramebuffers vuelve al fbo_0), `box86-t280.patch` (FILD/FISTP i64 sin atajo), `patch-engine-sdlver.sh`
+  (engine.so anuncia SDL 2.0.16: KMSDRM exige >=2.0.15), `run_portal.sh` (GL4ES propio, BOX86_LD_PRELOAD libstdc++/libgcc_s, `-game portal`,
+  BOX86_NODYNAREC=0x61700000-0x619c7000 porque el dinarec miscompila filesystem_stdio.so -> SIGILL). Con eso Portal carga server.so/GameUI.so
+  y entra al bucle de dibujado; pendientes: shaders GLSL de materiales (`vertexlit_and_unlit_generic_ps20b`, `lightmappedgeneric_ps20b`,
+  MRT gl_FragData) no compilan en GLES2/lima, pantalla negra; velocidad por ver.

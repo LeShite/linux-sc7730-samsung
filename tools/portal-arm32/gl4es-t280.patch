@@ -1,0 +1,343 @@
+diff --git a/src/CMakeLists.txt b/src/CMakeLists.txt
+index 0ddf160..83324b8 100644
+--- a/src/CMakeLists.txt
++++ b/src/CMakeLists.txt
+@@ -47,6 +47,7 @@ SET(GL_SRC
+     ${CMAKE_CURRENT_SOURCE_DIR}/gl/preproc.c
+     ${CMAKE_CURRENT_SOURCE_DIR}/gl/program.c
+     ${CMAKE_CURRENT_SOURCE_DIR}/gl/queries.c
++    ${CMAKE_CURRENT_SOURCE_DIR}/gl/sync.c
+     ${CMAKE_CURRENT_SOURCE_DIR}/gl/raster.c
+     ${CMAKE_CURRENT_SOURCE_DIR}/gl/render.c
+     ${CMAKE_CURRENT_SOURCE_DIR}/gl/samplers.c
+diff --git a/src/egl/egl.c b/src/egl/egl.c
+index ec1e920..4538eae 100644
+--- a/src/egl/egl.c
++++ b/src/egl/egl.c
+@@ -23,12 +23,14 @@ EGLint gl4es_eglGetError(void) {
+ 
+ EGLDisplay gl4es_eglGetDisplay(EGLNativeDisplayType display_id) {
+     LOAD_EGL(eglGetDisplay);
+-    return egl_eglGetDisplay(display_id);
++    EGLDisplay r = egl_eglGetDisplay(display_id);
++    return r;
+ }
+ 
+ EGLBoolean gl4es_eglInitialize(EGLDisplay dpy, EGLint *major, EGLint *minor) {
+     LOAD_EGL(eglInitialize);
+-    return egl_eglInitialize(dpy, major, minor);
++    EGLBoolean r = egl_eglInitialize(dpy, major, minor);
++    return r;
+ }
+ 
+ EGLBoolean gl4es_eglTerminate(EGLDisplay dpy) {
+@@ -47,8 +49,24 @@ EGLBoolean gl4es_eglGetConfigs(EGLDisplay dpy, EGLConfig *configs, EGLint config
+ }
+ 
+ EGLBoolean gl4es_eglChooseConfig(EGLDisplay dpy, const EGLint *attrib_list, EGLConfig *configs, EGLint config_size, EGLint *num_config) {
++    EGLint attribs[128];
++    int n = 0;
+     LOAD_EGL(eglChooseConfig);
+-    return egl_eglChooseConfig(dpy, attrib_list, configs, config_size, num_config);
++    // callers (SDL on KMSDRM, ...) ask for desktop GL configs: the real EGL only has GLES ones
++    // (eglGetConfigAttrib above already claims EGL_OPENGL_BIT), so ask it for GLES2 instead
++    if (attrib_list) {
++        while (attrib_list[n] != EGL_NONE && n < 124) {
++            attribs[n] = attrib_list[n];
++            attribs[n + 1] = attrib_list[n + 1];
++            if ((attribs[n] == EGL_RENDERABLE_TYPE || attribs[n] == EGL_CONFORMANT) && (attribs[n + 1] & EGL_OPENGL_BIT))
++                attribs[n + 1] = (attribs[n + 1] & ~EGL_OPENGL_BIT) | ((hardext.esversion == 1) ? EGL_OPENGL_ES_BIT : EGL_OPENGL_ES2_BIT);
++            n += 2;
++        }
++        attribs[n] = EGL_NONE;
++        attrib_list = attribs;
++    }
++    EGLBoolean r = egl_eglChooseConfig(dpy, attrib_list, configs, config_size, num_config);
++    return r;
+ }
+ 
+ EGLBoolean gl4es_eglGetConfigAttrib(EGLDisplay dpy, EGLConfig config, EGLint attribute, EGLint *value) {
+@@ -67,7 +85,8 @@ EGLBoolean gl4es_eglGetConfigAttrib(EGLDisplay dpy, EGLConfig config, EGLint att
+ 
+ EGLSurface gl4es_eglCreateWindowSurface(EGLDisplay dpy, EGLConfig config, EGLNativeWindowType win, const EGLint *attrib_list) {
+     LOAD_EGL(eglCreateWindowSurface);
+-    return egl_eglCreateWindowSurface(dpy, config, win, attrib_list);
++    EGLSurface r = egl_eglCreateWindowSurface(dpy, config, win, attrib_list);
++    return r;
+ }
+ 
+ EGLSurface gl4es_eglCreatePbufferSurface(EGLDisplay dpy, EGLConfig config, const EGLint *attrib_list) {
+@@ -92,7 +111,7 @@ EGLBoolean gl4es_eglQuerySurface(EGLDisplay dpy, EGLSurface surface, EGLint attr
+ 
+ EGLBoolean gl4es_eglBindAPI(EGLenum api) {
+     LOAD_EGL(eglBindAPI);
+-    return egl_eglBindAPI(EGL_OPENGL_ES_API);
++return egl_eglBindAPI(EGL_OPENGL_ES_API);
+ }
+ 
+ EGLenum gl4es_eglQueryAPI(void) {
+@@ -136,7 +155,8 @@ EGLBoolean gl4es_eglSwapInterval(EGLDisplay dpy, EGLint interval) {
+ 
+ EGLContext gl4es_eglCreateContext(EGLDisplay dpy, EGLConfig config, EGLContext share_context, const EGLint *attrib_list) {
+     LOAD_EGL(eglCreateContext);
+-    return egl_eglCreateContext(dpy, config, share_context, (hardext.esversion == 1) ? egl_context_attrib : egl_context_attrib_es2);
++    EGLContext r = egl_eglCreateContext(dpy, config, share_context, (hardext.esversion == 1) ? egl_context_attrib : egl_context_attrib_es2);
++return r;
+ }
+ 
+ EGLBoolean gl4es_eglDestroyContext(EGLDisplay dpy, EGLContext ctx) {
+@@ -144,9 +164,39 @@ EGLBoolean gl4es_eglDestroyContext(EGLDisplay dpy, EGLContext ctx) {
+     return egl_eglDestroyContext(dpy, ctx);
+ }
+ 
++// the contexts are created by the application (SDL, ...) and not by glXCreateContext, so gl4es has to make a
++// state for each one when it first becomes current, as the AGL layer does
++typedef struct { EGLContext ctx; void* state; } egl_ctxstate_t;
++static egl_ctxstate_t egl_ctxstates[16];
++
++void* NewGLState(void* shared_glstate, int es2only);
++void ActivateGLState(void* new_glstate);
++
++static void egl_activate_state(EGLContext ctx) {
++    int i, free_slot = -1;
++    for (i = 0; i < 16; i++) {
++        if (egl_ctxstates[i].ctx == ctx)
++            break;
++        if (free_slot < 0 && !egl_ctxstates[i].ctx)
++            free_slot = i;
++    }
++    if (i == 16) {
++        if (free_slot < 0)
++            return;
++        i = free_slot;
++        egl_ctxstates[i].ctx = ctx;
++        egl_ctxstates[i].state = NewGLState(NULL, 0);
++    }
++
++    ActivateGLState(egl_ctxstates[i].state);
++}
++
+ EGLBoolean gl4es_eglMakeCurrent(EGLDisplay dpy, EGLSurface draw, EGLSurface read, EGLContext ctx) {
+     LOAD_EGL(eglMakeCurrent);
+-    return egl_eglMakeCurrent(dpy, draw, read, ctx);
++    EGLBoolean r = egl_eglMakeCurrent(dpy, draw, read, ctx);
++    if (r && ctx != EGL_NO_CONTEXT)
++        egl_activate_state(ctx);
++    return r;
+ }
+ 
+ EGLContext gl4es_eglGetCurrentContext(void) {
+@@ -167,7 +217,8 @@ EGLDisplay gl4es_eglGetCurrentDisplay(void) {
+ EGLDisplay gl4es_eglGetPlatformDisplay(EGLenum platform, void *native_display, const EGLAttrib *attrib_list) {
+     LOAD_EGL_EXT(eglGetPlatformDisplay);
+     if (egl_eglGetPlatformDisplay)
+-        return egl_eglGetPlatformDisplay(platform, native_display, attrib_list);
++        { EGLDisplay r = egl_eglGetPlatformDisplay(platform, native_display, attrib_list);
++    return r; }
+     else {
+         LOAD_EGL(eglGetDisplay);
+         return egl_eglGetDisplay((EGLNativeDisplayType)native_display);
+diff --git a/src/gl/framebuffers.c b/src/gl/framebuffers.c
+index b0f0299..f1601c6 100644
+--- a/src/gl/framebuffers.c
++++ b/src/gl/framebuffers.c
+@@ -153,14 +153,15 @@ void APIENTRY_GL4ES gl4es_glDeleteFramebuffers(GLsizei n, GLuint *framebuffers)
+                                 tex->renderstencil = 0;
+                             }
+                         }
++                        // deleting the bound framebuffer binds the default one back (never leave these NULL)
+                         if (glstate->fbo.current_fb == fb) {
+-                            glstate->fbo.current_fb = 0;
++                            glstate->fbo.current_fb = glstate->fbo.fbo_0;
+                         }
+                         if (glstate->fbo.fbo_read == fb) {
+-                            glstate->fbo.fbo_read = 0;
++                            glstate->fbo.fbo_read = glstate->fbo.fbo_0;
+                         }
+                         if (glstate->fbo.fbo_draw == fb) {
+-                            glstate->fbo.fbo_draw = 0;
++                            glstate->fbo.fbo_draw = glstate->fbo.fbo_0;
+                         }
+                         free(fb);
+                         kh_del(framebufferlist_t, glstate->fbo.framebufferlist, k);                        
+diff --git a/src/gl/getter.c b/src/gl/getter.c
+index 4fa5356..313719f 100644
+--- a/src/gl/getter.c
++++ b/src/gl/getter.c
+@@ -92,6 +92,8 @@ void BuildExtensionsList() {
+                 "GL_EXT_compiled_vertex_array "
+                 "GL_EXT_compiled_vertex_arrays " // yes, at least on AmigaOS there are progs which check for this wrong string; reason is an old typo in the MiniGL driver.
+                 "GL_ARB_vertex_buffer_object "
++                "GL_ARB_sync "
++                "GL_EXT_texture_sRGB_decode "
+                 "GL_ARB_vertex_array_object "
+                 "GL_ARB_vertex_buffer "
+                 "GL_EXT_vertex_array "
+@@ -315,6 +317,9 @@ int gl4es_commonGet(GLenum pname, GLfloat *params) {
+         case GL_DOUBLEBUFFER:
+             *params = 1;    // Fake double buffering...
+             break;
++        case 0x9126:    // GL_CONTEXT_PROFILE_MASK: SDL and Source's togl ask; gl4es is a compatibility-profile GL
++            *params = 2;    // GL_CONTEXT_COMPATIBILITY_PROFILE_BIT
++            break;
+         case GL_MAX_ELEMENTS_INDICES:
+             *params = 1024;
+             break;
+diff --git a/src/gl/gl_lookup.c b/src/gl/gl_lookup.c
+index 99d4b3f..87682a4 100644
+--- a/src/gl/gl_lookup.c
++++ b/src/gl/gl_lookup.c
+@@ -22,6 +22,13 @@
+ #define DBG(a)
+ #endif
+ 
++void* APIENTRY_GL4ES gl4es_glFenceSync(GLenum condition, GLbitfield flags);
++GLboolean APIENTRY_GL4ES gl4es_glIsSync(void* sync);
++void APIENTRY_GL4ES gl4es_glDeleteSync(void* sync);
++GLenum APIENTRY_GL4ES gl4es_glClientWaitSync(void* sync, GLbitfield flags, GLuint64 timeout);
++void APIENTRY_GL4ES gl4es_glWaitSync(void* sync, GLbitfield flags, GLuint64 timeout);
++void APIENTRY_GL4ES gl4es_glGetSynciv(void* sync, GLenum pname, GLsizei bufSize, GLsizei* length, GLint* values);
++
+ #define STUB_FCT gl4es_Stub
+ #include "gl_lookup.h"
+ 
+@@ -705,6 +712,13 @@ void* APIENTRY_GL4ES gl4es_GetProcAddress(const char *name) {
+     _EXT(glMatrixMultTransposef);
+     _EXT(glMatrixMultTransposed);
+ 
++    _EX(glFenceSync);
++    _EX(glIsSync);
++    _EX(glDeleteSync);
++    _EX(glClientWaitSync);
++    _EX(glWaitSync);
++    _EX(glGetSynciv);
++
+     if(globals4es.queries) {
+         _EX(glGenQueries);
+         _EX(glIsQuery);
+diff --git a/src/gl/glstate.c b/src/gl/glstate.c
+index fe69266..a153fdd 100644
+--- a/src/gl/glstate.c
++++ b/src/gl/glstate.c
+@@ -61,7 +61,7 @@ void CopyGLEShard(void* dst, const void* src)
+     memcpy(((glstate_t*)dst)->gleshard, ((const glstate_t*)src)->gleshard, sizeof(gleshard_t));
+ }
+ 
+-void* NewGLState(void* shared_glstate, int es2only) {
++__attribute__((visibility("default"))) void* NewGLState(void* shared_glstate, int es2only) {
+     glstate_t *glstate = (shared_glstate!=DEFAULT_STATE)?((glstate_t*)calloc(1, sizeof(glstate_t))):&default_glstate;
+ #if defined(AMIGAOS4) || defined(__EMSCRIPTEN__)
+     int def = 0;
+@@ -615,7 +615,7 @@ void DeleteGLState(void* oldstate) {
+     return;
+ }
+ 
+-void ActivateGLState(void* new_glstate) {
++__attribute__((visibility("default"))) void ActivateGLState(void* new_glstate) {
+     glstate_t *newstate = (new_glstate)?(glstate_t*)new_glstate:&default_glstate;
+     if(glstate == newstate) return;  // same state, nothing to do
+     // check if viewport is correct
+diff --git a/src/gl/shaderconv.c b/src/gl/shaderconv.c
+index 3d0f46b..62a8e13 100644
+--- a/src/gl/shaderconv.c
++++ b/src/gl/shaderconv.c
+@@ -553,6 +553,15 @@ char* ConvertShader(const char* pEntry, int isVertex, shaderconv_need_t *need)
+     headline++;
+   }
+ 
++  // no 3D textures on GLES2 (no GL_OES_texture_3D on lima): let programs that only declare/preload them compile,
++  // by sampling the first slice of a 2D texture
++  if(strstr(Tmp, "sampler3D") || strstr(Tmp, "texture3D")) {
++    Tmp = gl4es_inplace_replace(Tmp, &tmpsize, "sampler3D", "sampler2D");
++    Tmp = gl4es_inplace_replace(Tmp, &tmpsize, "texture3D(", "gl4es_texture3D(");
++    Tmp = gl4es_inplace_insert(gl4es_getline(Tmp, headline-1), "vec4 gl4es_texture3D(sampler2D s, vec3 p) { return texture2D(s, p.xy); }\n", Tmp, &tmpsize);
++    ++headline;
++  }
++
+   const char* GLESUseShaderNonConstantGlobalInitialzers = "#extension GL_EXT_shader_non_constant_global_initializers : enable\n";
+   Tmp = gl4es_inplace_insert(gl4es_getline(Tmp, 1), GLESUseShaderNonConstantGlobalInitialzers, Tmp, &tmpsize);
+   ++headline;
+diff --git a/src/gl/sync.c b/src/gl/sync.c
+new file mode 100644
+index 0000000..a881479
+--- /dev/null
++++ b/src/gl/sync.c
+@@ -0,0 +1,65 @@
++// GL_ARB_sync (OpenGL 3.2 sync objects) for programs that insist on it (Source's togl asks for a fence extension).
++// GLES2 has no sync objects: a fence is a counter token, and waiting on one drains the GPU with glFinish, so
++// "signaled" is always true when the wait returns.
++#include <stdint.h>
++
++#include "attributes.h"
++#include "gl4es.h"
++
++#define SYNC_GPU_COMMANDS_COMPLETE 0x9117
++#define SYNC_OBJECT_TYPE           0x9112
++#define SYNC_CONDITION             0x9113
++#define SYNC_STATUS                0x9114
++#define SYNC_FLAGS                 0x9115
++#define SIGNALED                   0x9119
++#define SYNC_FENCE                 0x9116
++#define ALREADY_SIGNALED           0x911A
++#define CONDITION_SATISFIED        0x911C
++
++void APIENTRY_GL4ES gl4es_glFinish(void);
++
++static uintptr_t sync_counter = 0;
++
++void* APIENTRY_GL4ES gl4es_glFenceSync(GLenum condition, GLbitfield flags) {
++    (void)condition; (void)flags;
++    return (void*)(++sync_counter);
++}
++
++GLboolean APIENTRY_GL4ES gl4es_glIsSync(void* sync) {
++    return sync != NULL;
++}
++
++void APIENTRY_GL4ES gl4es_glDeleteSync(void* sync) {
++    (void)sync;
++}
++
++GLenum APIENTRY_GL4ES gl4es_glClientWaitSync(void* sync, GLbitfield flags, GLuint64 timeout) {
++    (void)sync; (void)flags; (void)timeout;
++    gl4es_glFinish();
++    return CONDITION_SATISFIED;
++}
++
++void APIENTRY_GL4ES gl4es_glWaitSync(void* sync, GLbitfield flags, GLuint64 timeout) {
++    (void)sync; (void)flags; (void)timeout;
++}
++
++void APIENTRY_GL4ES gl4es_glGetSynciv(void* sync, GLenum pname, GLsizei bufSize, GLsizei* length, GLint* values) {
++    (void)sync;
++    if (bufSize < 1 || !values)
++        return;
++    switch (pname) {
++        case SYNC_OBJECT_TYPE: values[0] = SYNC_FENCE; break;
++        case SYNC_CONDITION:   values[0] = SYNC_GPU_COMMANDS_COMPLETE; break;
++        case SYNC_STATUS:      values[0] = SIGNALED; break;
++        default:               values[0] = 0; break;
++    }
++    if (length)
++        *length = 1;
++}
++
++AliasExport(void*,glFenceSync,,(GLenum condition, GLbitfield flags));
++AliasExport(GLboolean,glIsSync,,(void* sync));
++AliasExport(void,glDeleteSync,,(void* sync));
++AliasExport(GLenum,glClientWaitSync,,(void* sync, GLbitfield flags, GLuint64 timeout));
++AliasExport(void,glWaitSync,,(void* sync, GLbitfield flags, GLuint64 timeout));
++AliasExport(void,glGetSynciv,,(void* sync, GLenum pname, GLsizei bufSize, GLsizei* length, GLint* values));
+diff --git a/src/gl/texture_params.c b/src/gl/texture_params.c
+index 96e0720..77e22cd 100644
+--- a/src/gl/texture_params.c
++++ b/src/gl/texture_params.c
+@@ -311,6 +311,8 @@ void APIENTRY_GL4ES gl4es_glTexParameterfv(GLenum target, GLenum pname, const GL
+                 return;            // not on GLES
+             case GL_TEXTURE_LOD_BIAS:
+                 return;            // not on GLES
++            case 0x8A48:        // GL_TEXTURE_SRGB_DECODE_EXT: sRGB decoding is not switchable on GLES, ignore
++                return;
+             case GL_GENERATE_MIPMAP:
+                 if(globals4es.automipmap==3)
+                     return; // no mipmap, so no need to generate any

@@ -1,0 +1,24 @@
+diff --git a/src/dynarec/dynarec_arm_df.c b/src/dynarec/dynarec_arm_df.c
+index 465aee6..87c9aa9 100755
+--- a/src/dynarec/dynarec_arm_df.c
++++ b/src/dynarec/dynarec_arm_df.c
+@@ -268,7 +268,8 @@ uintptr_t dynarecDF(dynarec_arm_t* dyn, uintptr_t addr, uintptr_t ip, int ninst,
+                         LDR_IMM9(x2, wback, 0);
+                         LDR_IMM9(x3, wback, 4);
+                     }
+-                    if(ninst<dyn->size
++                    if(0   // FILD/FISTP i64 fusing disabled: it stored zeros for Portal's libvstdlib (see tools/portal-arm32/box86-t280.patch)
++                      && ninst<dyn->size
+                       && dyn->insts[ninst+1].x86.addr
+                       && *(uint8_t*)dyn->insts[ninst+1].x86.addr==0xDF
+                       && (((*(uint8_t*)(dyn->insts[ninst+1].x86.addr+1))>>3)&7)==7)
+@@ -325,7 +326,8 @@ uintptr_t dynarecDF(dynarec_arm_t* dyn, uintptr_t addr, uintptr_t ip, int ninst,
+                     INST_NAME("FISTP i64, ST0");
+                     parity = getedparity(dyn, ninst, addr, nextop, 3);
+                     addr = geted(dyn, addr, ninst, nextop, &ed, x1, &fixedaddress, 0, 0, 0, NULL);
+-                    if(ninst
++                    if(0
++                      && ninst
+                       && dyn->insts[ninst-1].x86.addr
+                       && *(uint8_t*)dyn->insts[ninst-1].x86.addr==0xDF
+                       && (((*(uint8_t*)(dyn->insts[ninst-1].x86.addr+1))>>3)&7)==5)

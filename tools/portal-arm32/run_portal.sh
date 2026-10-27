@@ -22,7 +22,12 @@ GAME_ROOT=${PORTAL_GAME_ROOT:-/userdata/roms/ports/.data/Portal_Linux/game}
 LOG_DIR=${PORTAL_LOG_DIR:-/userdata/system/logs}
 GL4ES_LIB=${GL4ES_LIB:-/usr/lib/gl4es/libGL.so.1}
 
-if [[ ! -r "$GL4ES_LIB" && -r /userdata/system/gl4es/libGL.so.1 ]]; then
+# our patched gl4es (EGL wrapper, GL_ARB_sync, profile mask; see README) wins over the image's own
+if [[ -r /userdata/system/gl4es/libGL.so.1 && -r /userdata/system/gl4es/libEGL.so.1 ]]; then
+	GL4ES_LIB=/userdata/system/gl4es/libGL.so.1
+	export SDL_VIDEO_GL_DRIVER=${SDL_VIDEO_GL_DRIVER:-$GL4ES_LIB}
+	export SDL_VIDEO_EGL_DRIVER=${SDL_VIDEO_EGL_DRIVER:-/userdata/system/gl4es/libEGL.so.1}
+elif [[ ! -r "$GL4ES_LIB" && -r /userdata/system/gl4es/libGL.so.1 ]]; then
 	GL4ES_LIB=/userdata/system/gl4es/libGL.so.1
 fi
 if [[ -n "${BOX86_BIN:-}" ]]; then
@@ -58,7 +63,16 @@ for candidate in \
 	[[ -d "$candidate" ]] && X86_PATH="$X86_PATH:$candidate"
 done
 
-export BOX86_DYNAREC=1
+# engine.so needs libstdc++/libgcc_s symbols that Box86 only finds if those are loaded globally first
+if [[ -n "$STEAM_RUNTIME" ]]; then
+	export BOX86_LD_PRELOAD="${BOX86_LD_PRELOAD:-$STEAM_RUNTIME/i386/lib/i386-linux-gnu/libgcc_s.so.1:$STEAM_RUNTIME/i386/usr/lib/i386-linux-gnu/libstdc++.so.6}"
+fi
+# Box86's dynarec miscompiles filesystem_stdio.so (Valve's file system lib, SSE2 big-int code and operator new):
+# the game kills itself with SIGILL on its first allocation. Box86 maps it at the same place every run, so keep
+# the interpreter for that range only (everything else stays on the dynarec). Override with BOX86_NODYNAREC=
+# (empty to turn it off). Re-check the range with BOX86_LOG=2 ("Pre-allocated ... byte at 0x...") if the libs change.
+export BOX86_NODYNAREC=${BOX86_NODYNAREC-0x61700000-0x619c7000}
+export BOX86_DYNAREC=${BOX86_DYNAREC:-1}
 export BOX86_LOG=${BOX86_LOG:-1}
 export BOX86_LIBGL="$GL4ES_LIB"
 export BOX86_LD_LIBRARY_PATH="$X86_PATH${BOX86_LD_LIBRARY_PATH:+:$BOX86_LD_LIBRARY_PATH}"
@@ -84,7 +98,7 @@ echo "Box86: $BOX86"
 echo "GL4ES: $GL4ES_LIB"
 echo "SDL video driver: $SDL_VIDEODRIVER"
 echo "CPU: $MACHINE, ${BITS}-bit ARM (NEON + VFPv3 confirmed)"
-echo "Args: -fullscreen -width 800 -height 600 -dxlevel 80 (retry 81 on shader error)"
+echo "Args: -game portal -fullscreen -width 800 -height 600 -dxlevel 80 (retry 81 on shader error)"
 
 STATUS=0
 ATTEMPT=0
@@ -94,7 +108,8 @@ while :; do
 	echo "Launch attempt $ATTEMPT (-dxlevel $DXLEVEL)"
 	set +e
 	{
-		"$BOX86" ./hl2_linux -fullscreen -width 800 -height 600 "-dxlevel" "$DXLEVEL"
+		# shellcheck disable=SC2086  (PORTAL_EXTRA_ARGS is meant to word-split, e.g. "-condebug -novid")
+		"$BOX86" ./hl2_linux -game portal -fullscreen -width 800 -height 600 "-dxlevel" "$DXLEVEL" ${PORTAL_EXTRA_ARGS:-}
 	} 2>&1 | tee -a "$LOG"
 	STATUS=${PIPESTATUS[0]}
 	set -e
