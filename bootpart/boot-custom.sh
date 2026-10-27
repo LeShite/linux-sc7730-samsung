@@ -29,6 +29,8 @@ start)
 	nohup setsid bash /boot/batwatch.sh </dev/null >/dev/null 2>&1 &
 	# USB network to the PC: 10.42.7.2 on usb0 (kernel dwc2 + g_ether), ssh root@10.42.7.2
 	nohup setsid bash /boot/usbnet.sh </dev/null >/dev/null 2>&1 &
+	# WiFi chip: firmware + calibration over SDIO once /dev/marlin shows up (see /boot/marlin/marlin-up.sh)
+	nohup setsid bash /boot/marlin/marlin-up.sh </dev/null >/dev/null 2>&1 &
 	[ -e /boot/audiotest/run ] && nohup setsid bash /boot/audiotest/audio-test.sh </dev/null >/dev/null 2>&1 &
 	;;
 trace)
