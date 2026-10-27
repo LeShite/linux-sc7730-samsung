@@ -22,5 +22,12 @@ L=/boot/marlin/marlin.log
 		connmanctl scan wifi 2>&1
 		echo "connman: WiFi activado"
 	fi
+	# Bluetooth: HCI over UART0 once the firmware runs; its BD address = our MAC + 1 (same stable device)
+	if [ "$(batocera-settings-get -f /userdata/system/batocera.conf controllers.bluetooth.enabled 2>/dev/null)" != "0" ]; then
+		MAC=$(cat /boot/marlin/mac)
+		LAST=$(( (0x${MAC##*:} + 1) & 255 ))
+		BD=$(printf '%s:%02x' "${MAC%:*}" "$LAST")
+		echo "1 $BD" >/sys/devices/virtual/misc/marlin/bt && echo "Bluetooth registrado, direccion $BD"
+	fi
 	echo "== fin rc=$? up=$(cut -d' ' -f1 /proc/uptime)"
 } >>"$L" 2>&1
