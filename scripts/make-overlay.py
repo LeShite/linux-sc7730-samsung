@@ -196,7 +196,10 @@ def main():
            'log_to_file_timestamp = "false"\n'
            'log_dir = "/userdata/system/logs"\n')
     for name in SYSTEMS:
-        (OUT / "retroarch" / f"{name}.cfg").write_text(cfg)
+        extra = ""
+        if name == "n64":	# no analog stick on the touch pad: the D-pad drives the N64 stick (core option alt-map: C buttons on the face buttons)
+            extra = '# no analog stick on the touch pad: the D-pad drives the N64 stick\ninput_player1_analog_dpad_mode = "1"\n'
+        (OUT / "retroarch" / f"{name}.cfg").write_text(cfg + extra)
 
     # PipeWire's graph runs at 48 kHz by default while the apps mostly use 44.1: pin it to CD rate.
     # Drop-in for both places a user config may live ($HOME/.config and $XDG_CONFIG_HOME)

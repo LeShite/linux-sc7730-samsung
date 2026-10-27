@@ -12,6 +12,8 @@ TRACE=/boot/trace.log
 case "$1" in
 start)
 	mount -o remount,rw /boot
+	# libretro cores we built (N64: parallel_n64) live in /boot/cores; the root filesystem is read-only/volatile
+	cp /boot/cores/*_libretro.so /usr/lib/libretro/ 2>/dev/null
 	# before S06audio starts PipeWire: pin it to 44.1 kHz (see /boot/pipewire/10-rate.conf)
 	mkdir -p /etc/pipewire/pipewire.conf.d && cp /boot/pipewire/10-rate.conf /etc/pipewire/pipewire.conf.d/
 	# S12populateshare deletes ~/.asoundrc and /boot/asoundrc at every boot, so the ALSA config goes into
