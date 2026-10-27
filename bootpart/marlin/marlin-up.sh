@@ -7,6 +7,15 @@ L=/boot/marlin/marlin.log
 	echo "== $(date '+%F %T') up=$(cut -d' ' -f1 /proc/uptime) esperando /dev/marlin"
 	for i in $(seq 1 240); do [ -e /dev/marlin ] && break; sleep 0.5; done
 	if [ ! -e /dev/marlin ]; then echo "no aparecio /dev/marlin"; exit 1; fi
+	# TEST: wake_out (GPIO 46) must be LOW while the firmware boots, as in the vendor driver
+	python3 - <<'PY'
+import mmap, os, struct
+fd = os.open("/dev/mem", os.O_RDWR | os.O_SYNC)
+m = mmap.mmap(fd, 0x1000, mmap.MAP_SHARED, mmap.PROT_READ | mmap.PROT_WRITE, offset=0x40280000)
+b, t = divmod(46, 16)
+d = struct.unpack_from("<H", m, b * 0x80)[0]
+struct.pack_into("<H", m, b * 0x80, d & ~(1 << t))
+PY
 	cd /boot/marlin && python3 -u marlin_up.py || { echo "marlin_up fallo"; exit 1; }
 	# firmware running and calibrated: register wlan0 (kernel sprd-sc2331-wlan)
 	# a MAC of our own, made once and kept (locally administered, so it cannot clash with a real one)

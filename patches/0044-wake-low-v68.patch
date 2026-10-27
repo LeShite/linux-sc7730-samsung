@@ -1,0 +1,51 @@
+From e1974e4544c4616898193baa0ef8f78b5498853d Mon Sep 17 00:00:00 2001
+From: gtex-port <igomezv0921@gmail.com>
+Date: Mon, 26 Oct 2026 21:17:06 -0600
+Subject: [PATCH] marlin: wake_out low at probe (the firmware boots only like
+ that), firmware string offset (v68)
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ drivers/misc/sprd-marlin-sdio.c | 4 ++--
+ drivers/misc/sprd-sc2331-wlan.c | 3 ++-
+ 2 files changed, 4 insertions(+), 3 deletions(-)
+
+diff --git a/drivers/misc/sprd-marlin-sdio.c b/drivers/misc/sprd-marlin-sdio.c
+index c85fa725f..071b57971 100644
+--- a/drivers/misc/sprd-marlin-sdio.c
++++ b/drivers/misc/sprd-marlin-sdio.c
+@@ -327,8 +327,8 @@ static int marlin_probe(struct sdio_func *func, const struct sdio_device_id *id)
+ 		m->data_irq = fwnode_gpiod_get_index(of_fwnode_handle(np), "data-irq", 0, GPIOD_IN, "marlin-irq");
+ 		if (IS_ERR(m->data_irq))
+ 			m->data_irq = NULL;
+-		/* held high (chip awake) until the WiFi driver takes over the sleep policy */
+-		m->wake_out = fwnode_gpiod_get_index(of_fwnode_handle(np), "wake-out", 0, GPIOD_OUT_HIGH, "marlin-wake-out");
++		/* LOW like the vendor driver: with it high while the firmware boots, the SDIO side never answers */
++		m->wake_out = fwnode_gpiod_get_index(of_fwnode_handle(np), "wake-out", 0, GPIOD_OUT_LOW, "marlin-wake-out");
+ 		m->wake_ack = fwnode_gpiod_get_index(of_fwnode_handle(np), "wake-ack", 0, GPIOD_IN, "marlin-wake-ack");
+ 		if (IS_ERR(m->wake_out) || IS_ERR(m->wake_ack))
+ 			m->wake_out = m->wake_ack = NULL;
+diff --git a/drivers/misc/sprd-sc2331-wlan.c b/drivers/misc/sprd-sc2331-wlan.c
+index 22c7dcb7c..e290299d3 100644
+--- a/drivers/misc/sprd-sc2331-wlan.c
++++ b/drivers/misc/sprd-sc2331-wlan.c
+@@ -299,7 +299,7 @@ static void evt_disconnect(struct sc2331 *sc, const u8 *p, int len)
+ static void rx_event(struct sc2331 *sc, u8 evt, const u8 *p, int len)
+ {
+ 	if (evt == 144)				/* firmware version string, right after the firmware starts */
+-		dev_info(sc->wiphy->dev.parent, "firmware %.*s\n", len > 4 ? len - 4 : 0, p + 4);
++		dev_info(sc->wiphy->dev.parent, "firmware %.*s\n", len > 8 ? len - 8 : 0, p + 8);
+ 	else if (evt != EVT_REPORT_SCAN_FRAME)
+ 		dev_dbg(sc->wiphy->dev.parent, "event %u len %d: %*ph\n", evt, len, min(len, 32), p);
+ 	switch (evt) {
+@@ -960,6 +960,7 @@ int sc2331_wlan_start(struct marlin_sdio *m, const u8 *mac)
+ 	if (ret)
+ 		goto err_netdev;
+ 
++	marlin_sdio_wake(m);			/* the thread starts with the chip awake */
+ 	sc->task = kthread_run(sc_thread, sc, "sc2331");
+ 	if (IS_ERR(sc->task)) {
+ 		ret = PTR_ERR(sc->task);
+-- 
+2.56.0
+
