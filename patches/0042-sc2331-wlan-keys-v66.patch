@@ -1,0 +1,103 @@
+From c6bae42f1f7f6c93e228d4e05bc09bde2847e34b Mon Sep 17 00:00:00 2001
+From: gtex-port <igomezv0921@gmail.com>
+Date: Mon, 26 Oct 2026 20:40:03 -0600
+Subject: [PATCH] sprd-sc2331-wlan: wpa_supplicant runs the handshake, keys go
+ to the firmware (v66)
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ drivers/misc/sprd-sc2331-wlan.c | 62 ++++++++++++++++++++++++++++-----
+ 1 file changed, 54 insertions(+), 8 deletions(-)
+
+diff --git a/drivers/misc/sprd-sc2331-wlan.c b/drivers/misc/sprd-sc2331-wlan.c
+index 833b840ac..827eb1257 100644
+--- a/drivers/misc/sprd-sc2331-wlan.c
++++ b/drivers/misc/sprd-sc2331-wlan.c
+@@ -707,22 +707,69 @@ static int sc_disconnect(struct wiphy *wiphy, struct net_device *ndev, u16 reaso
+ 	return sc_cmd(sc, CMD_SET_DISCONNECT, &r, sizeof(r), CMD_TIMEOUT_MS);
+ }
+ 
+-/* the firmware keeps its own keys; only WEP would need these */
+-static int sc_add_key(struct wiphy *w, struct net_device *d, int link_id, u8 idx, bool pairwise,
++/*
++ * The firmware does not run the WPA handshake: it hands the EAPOL frames to the host (wpa_supplicant
++ * answers them through the netdev) and wants the resulting keys with these commands.
++ */
++struct fw_add_key {
++	u8 mac[ETH_ALEN];
++	u8 keyseq[8];
++	u8 pairwise;
++	u8 cypher_type;
++	u8 key_index;
++	u8 key_len;
++	u8 value[];
++} __packed;
++
++static int sc_add_key(struct wiphy *wiphy, struct net_device *d, int link_id, u8 idx, bool pairwise,
+ 		      const u8 *mac, struct key_params *params)
+ {
+-	return 0;
++	struct sc2331 *sc = wiphy_priv(wiphy);
++	struct fw_add_key *k;
++	int ret;
++
++	if (params->key_len > 32)
++		return -EINVAL;
++	k = kzalloc(sizeof(*k) + params->key_len, GFP_KERNEL);
++	if (!k)
++		return -ENOMEM;
++	if (mac)
++		memcpy(k->mac, mac, ETH_ALEN);
++	if (params->seq)
++		memcpy(k->keyseq, params->seq, min_t(int, params->seq_len, 8));
++	k->pairwise = pairwise;
++	k->cypher_type = cipher_to_fw(params->cipher);
++	k->key_index = idx;
++	k->key_len = params->key_len;
++	memcpy(k->value, params->key, params->key_len);
++	ret = sc_cmd(sc, CMD_KEY_ADD, k, sizeof(*k) + params->key_len, CMD_TIMEOUT_MS);
++	dev_info(wiphy->dev.parent, "add_key idx %u pairwise %d cipher %#x len %d -> %d\n", idx, pairwise,
++		 params->cipher, params->key_len, ret);
++	kfree(k);
++	return ret;
+ }
+ 
+-static int sc_del_key(struct wiphy *w, struct net_device *d, int link_id, u8 idx, bool pairwise, const u8 *mac)
++static int sc_del_key(struct wiphy *wiphy, struct net_device *d, int link_id, u8 idx, bool pairwise,
++		      const u8 *mac)
+ {
+-	return 0;
++	struct sc2331 *sc = wiphy_priv(wiphy);
++	struct {
++		u8 key_index;
++		u8 pairwise;
++		u8 mac[ETH_ALEN];
++	} __packed del = { .key_index = idx };
++
++	if (mac)
++		memcpy(del.mac, mac, ETH_ALEN);
++	return sc_cmd(sc, CMD_KEY_DEL, &del, sizeof(del), CMD_TIMEOUT_MS);
+ }
+ 
+-static int sc_set_default_key(struct wiphy *w, struct net_device *d, int link_id, u8 idx, bool unicast,
++static int sc_set_default_key(struct wiphy *wiphy, struct net_device *d, int link_id, u8 idx, bool unicast,
+ 			      bool multicast)
+ {
+-	return 0;
++	struct sc2331 *sc = wiphy_priv(wiphy);
++
++	return sc_cmd_u32(sc, CMD_KEY_SET, idx);
+ }
+ 
+ static int sc_change_iface(struct wiphy *w, struct net_device *d, enum nl80211_iftype type,
+@@ -826,7 +873,6 @@ int sc2331_wlan_start(struct marlin_sdio *m)
+ 	wiphy->n_cipher_suites = ARRAY_SIZE(sc_ciphers);
+ 	wiphy->bands[NL80211_BAND_2GHZ] = &sc_band_2ghz;
+ 	wiphy->flags &= ~WIPHY_FLAG_PS_ON_BY_DEFAULT;
+-	wiphy_ext_feature_set(wiphy, NL80211_EXT_FEATURE_4WAY_HANDSHAKE_STA_PSK);
+ 	ret = wiphy_register(wiphy);
+ 	if (ret)
+ 		goto err_free;
+-- 
+2.56.0
+
