@@ -78,3 +78,4 @@ obj-$(CONFIG_MISC_RP1)		+= rp1/
 obj-$(CONFIG_SPRD_SC8830_AUDIO_TEST)	+= sc8830-audio-test.o
 obj-$(CONFIG_ARCH_SPRD)	+= sc8830-adi-lock.o
 obj-$(CONFIG_SPRD_SC2331_MARLIN)	+= sprd-sc2331-marlin.o
+obj-$(CONFIG_SPRD_MARLIN_SDIO)	+= sprd-marlin-sdio.o

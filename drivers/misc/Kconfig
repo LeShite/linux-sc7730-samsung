@@ -680,3 +680,11 @@ source "drivers/misc/keba/Kconfig"
 source "drivers/misc/amd-sbi/Kconfig"
 source "drivers/misc/rp1/Kconfig"
 endmenu
+
+config SPRD_MARLIN_SDIO
+	bool "Spreadtrum SC2331 Marlin SDIO transport (bring-up)"
+	depends on SPRD_SC2331_MARLIN && MMC
+	help
+	  Talks to the Marlin WiFi/BT chip over SDIO channels once the FDL1
+	  loader has started it, and exposes /dev/marlin for experiments.
+

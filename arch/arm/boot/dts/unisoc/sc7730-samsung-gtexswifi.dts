@@ -114,6 +114,8 @@
 		vddcon-supply = <&vddcon>;
 		vddwifipa-supply = <&vddwifipa>;
 		sdio-host = <&sdio1>;
+		/* vendor sprd-marlin gpios: 0 = wake ack (148), 1 = data irq (45), 2 = wake out (46) */
+		data-irq-gpios = <&gpio 45 GPIO_ACTIVE_HIGH>;
 	};
 };
 
