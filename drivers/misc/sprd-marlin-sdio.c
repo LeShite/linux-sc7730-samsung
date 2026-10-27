@@ -46,6 +46,7 @@ struct marlin_sdio {
 	struct mutex lock;
 	wait_queue_head_t wait;
 	bool irq_seen;
+	atomic_t hold;			/* users that need the chip awake (Bluetooth) */
 	void (*irq_cb)(void *);
 	void *irq_cb_data;
 	u8 *buf;
@@ -145,8 +146,25 @@ int marlin_sdio_wake(struct marlin_sdio *m)
 	return -ETIMEDOUT;
 }
 
+void marlin_sdio_hold_awake(struct marlin_sdio *m, bool hold)
+{
+	if (hold) {
+		atomic_inc(&m->hold);
+		marlin_sdio_wake(m);
+	} else {
+		atomic_dec_if_positive(&m->hold);
+	}
+}
+
+bool marlin_sdio_held(struct marlin_sdio *m)
+{
+	return atomic_read(&m->hold) > 0;
+}
+
 void marlin_sdio_sleep(struct marlin_sdio *m)
 {
+	if (atomic_read(&m->hold) > 0)
+		return;
 	if (m->wake_out)
 		gpiod_set_value(m->wake_out, 0);
 }
@@ -293,6 +311,37 @@ static ssize_t wlan_store(struct device *dev, struct device_attribute *attr, con
 }
 static DEVICE_ATTR_WO(wlan);
 
+/* echo "1 aa:bb:cc:dd:ee:ff" > bt registers the Bluetooth controller (BD address given); 0 removes it */
+static ssize_t bt_store(struct device *dev, struct device_attribute *attr, const char *buf, size_t n)
+{
+	struct marlin_sdio *m = marlin;
+	u8 mac[ETH_ALEN], bd[ETH_ALEN];
+	bool on, have_mac = false;
+	char word[4] = { 0 };
+	int ret, i;
+
+	if (sscanf(buf, "%3s", word) != 1 || kstrtobool(word, &on))
+		return -EINVAL;
+	if (on && strchr(buf, ' ') &&
+	    sscanf(strchr(buf, ' ') + 1, "%hhx:%hhx:%hhx:%hhx:%hhx:%hhx", &mac[0], &mac[1], &mac[2], &mac[3], &mac[4], &mac[5]) == 6)
+		have_mac = true;
+	if (!m)
+		return -ENODEV;
+	if (!on) {
+		sprd_marlin_bt_stop();
+		marlin_sdio_hold_awake(m, false);
+		return n;
+	}
+	for (i = 0; i < ETH_ALEN; i++)		/* HCI wants the address least significant byte first */
+		bd[i] = mac[ETH_ALEN - 1 - i];
+	marlin_sdio_hold_awake(m, true);	/* the chip must not sleep with Bluetooth running */
+	ret = sprd_marlin_bt_start(have_mac ? bd : NULL);
+	if (ret)
+		marlin_sdio_hold_awake(m, false);
+	return ret ?: n;
+}
+static DEVICE_ATTR_WO(bt);
+
 static int marlin_probe(struct sdio_func *func, const struct sdio_device_id *id)
 {
 	struct device_node *np = of_find_compatible_node(NULL, NULL, "sprd,sc2331-marlin");
@@ -351,7 +400,8 @@ static int marlin_probe(struct sdio_func *func, const struct sdio_device_id *id)
 	ret = misc_register(&marlin_misc);
 	if (!ret)
 		ret = device_create_file(marlin_misc.this_device, &dev_attr_status) ?:
-		      device_create_file(marlin_misc.this_device, &dev_attr_wlan);
+		      device_create_file(marlin_misc.this_device, &dev_attr_wlan) ?:
+		      device_create_file(marlin_misc.this_device, &dev_attr_bt);
 	dev_info(&func->dev, "Marlin SDIO function 1 enabled, /dev/marlin %s, irq %d\n", ret ? "FAILED" : "ready", m->irq);
 	return ret;
 err:
@@ -366,6 +416,8 @@ static void marlin_remove(struct sdio_func *func)
 
 	marlin = NULL;
 	sc2331_wlan_stop();
+	sprd_marlin_bt_stop();
+	device_remove_file(marlin_misc.this_device, &dev_attr_bt);
 	device_remove_file(marlin_misc.this_device, &dev_attr_wlan);
 	device_remove_file(marlin_misc.this_device, &dev_attr_status);
 	misc_deregister(&marlin_misc);

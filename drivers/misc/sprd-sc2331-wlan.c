@@ -538,7 +538,7 @@ static int sc_thread(void *arg)
 			did |= sc_tx(sc);
 			if (did) {
 				sc->last_active = jiffies;
-			} else if (idle_sleep_ms && sc->opened &&
+			} else if (idle_sleep_ms && sc->opened && !marlin_sdio_held(sc->m) &&
 				   time_after(jiffies, sc->last_active + msecs_to_jiffies(idle_sleep_ms))) {
 				marlin_sdio_sleep(sc->m);
 				sc->awake = false;

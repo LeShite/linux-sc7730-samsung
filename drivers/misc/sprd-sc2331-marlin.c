@@ -18,9 +18,16 @@
 #include <linux/of.h>
 #include <linux/regulator/consumer.h>
 #include <linux/serdev.h>
+#include <linux/sprd-marlin-sdio.h>
 #include <linux/spinlock.h>
 #include <linux/string.h>
 #include <linux/wait.h>
+
+#if IS_ENABLED(CONFIG_BT_HCIUART_SERDEV)
+#include <net/bluetooth/bluetooth.h>
+#include <net/bluetooth/hci_core.h>
+#include "../bluetooth/hci_uart.h"
+#endif
 
 #define MARLIN_FLAG		0x7e
 #define MARLIN_ESCAPE		0x7d
@@ -50,6 +57,11 @@ struct sprd_marlin {
 	struct regulator_bulk_data supplies[2];
 	struct device_node *sdio_host;
 	struct work_struct work;
+	bool serdev_open, bt_up, have_bd_addr;
+	u8 bd_addr[6];
+#if IS_ENABLED(CONFIG_BT_HCIUART_SERDEV)
+	struct hci_uart hu;
+#endif
 	const char *firmware_name;
 	u32 fdl_load_address;
 	spinlock_t rx_lock;
@@ -62,6 +74,9 @@ struct sprd_marlin {
 	u8 tx_raw[MARLIN_RAW_SIZE];
 	u8 tx_buf[MARLIN_TX_SIZE];
 };
+
+static struct sprd_marlin *g_marlin;
+
 
 static u16 sprd_marlin_crc16(const u8 *data, size_t len)
 {
@@ -502,7 +517,9 @@ static int sprd_marlin_probe(struct serdev_device *serdev)
 	serdev_device_set_drvdata(serdev, marlin);
 	serdev_device_set_client_ops(serdev, &sprd_marlin_serdev_ops);
 
-	ret = devm_serdev_device_open(dev, serdev);
+	ret = serdev_device_open(serdev);
+	if (!ret)
+		marlin->serdev_open = true;
 	if (ret) {
 		of_node_put(marlin->sdio_host);
 		return dev_err_probe(dev, ret, "failed to open UART0\n");
@@ -512,6 +529,7 @@ static int sprd_marlin_probe(struct serdev_device *serdev)
 	serdev_device_set_flow_control(serdev, false);
 	dev_info(dev, "UART0 configured for %u baud\n", baud);
 
+	g_marlin = marlin;
 	INIT_WORK(&marlin->work, sprd_marlin_work);
 	schedule_work(&marlin->work);
 	return 0;
@@ -519,13 +537,199 @@ static int sprd_marlin_probe(struct serdev_device *serdev)
 
 static void sprd_marlin_remove(struct serdev_device *serdev)
 {
-	struct sprd_marlin *marlin = serdev_device_get_drvdata(serdev);
+	struct sprd_marlin *marlin = g_marlin;
 
+	sprd_marlin_bt_stop();
 	cancel_work_sync(&marlin->work);
+	if (marlin->serdev_open)
+		serdev_device_close(serdev);
+	g_marlin = NULL;
 	if (marlin->reset)
 		gpiod_set_value_cansleep(marlin->reset, 1);
 	of_node_put(marlin->sdio_host);
 }
+
+
+/* ---- Bluetooth over the same UART0 -------------------------------------------------------------------
+ *
+ * Once the firmware runs, UART0 carries plain H4 HCI at 3 Mbaud with hardware flow control, after a
+ * vendor command (opcode 0xfca0) with the controller's configuration: the pskey_bt.txt of Samsung's
+ * libbt-vendor, packed as its hw_pskey_send() does (196 bytes: the struct without its first word, with
+ * the alignment padding). The BD address (offset 76, little endian) is replaced by our own.
+ */
+#if IS_ENABLED(CONFIG_BT_HCIUART_SERDEV)
+#define MARLIN_PSKEY_OP		0xfca0
+#define MARLIN_PSKEY_ADDR_OFF	76
+#define MARLIN_BT_BAUD		3000000
+
+static const u8 marlin_pskey[196] = {
+	0x00, 0x01, 0x01, 0x01, 0x80, 0xba, 0x8c, 0x01, 0x00, 0x1f, 0x00, 0x00,
+	0x1e, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00,
+	0x02, 0x00, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00,
+	0x05, 0x00, 0x00, 0x00, 0xfe, 0x8c, 0x41, 0xd0, 0xfe, 0x8c, 0x43, 0xd2,
+	0xfe, 0x8c, 0x43, 0xd4, 0xfe, 0x8c, 0x43, 0xd6, 0xfe, 0x8c, 0x04, 0xd8,
+	0xff, 0xff, 0x8d, 0xfe, 0x9b, 0x3f, 0x79, 0x83, 0xff, 0xa7, 0xff, 0x7f,
+	0x00, 0xe0, 0xf7, 0x3e, 0x11, 0xff, 0x00, 0x22, 0x2d, 0xae, 0x00, 0x01,
+	0x05, 0x0e, 0x00, 0x00, 0xff, 0xff, 0xff, 0xff, 0x30, 0x00, 0x3f, 0x00,
+	0x00, 0x00, 0x00, 0x00, 0x65, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+	0x00, 0x00, 0x00, 0x00,
+};
+
+struct marlin_h4 {
+	struct sk_buff *rx_skb;
+	struct sk_buff_head txq;
+};
+
+static int marlin_h4_open(struct hci_uart *hu)
+{
+	struct marlin_h4 *h4 = kzalloc(sizeof(*h4), GFP_KERNEL);
+
+	if (!h4)
+		return -ENOMEM;
+	skb_queue_head_init(&h4->txq);
+	hu->priv = h4;
+	return 0;
+}
+
+static int marlin_h4_flush(struct hci_uart *hu)
+{
+	struct marlin_h4 *h4 = hu->priv;
+
+	skb_queue_purge(&h4->txq);
+	return 0;
+}
+
+static int marlin_h4_close(struct hci_uart *hu)
+{
+	struct marlin_h4 *h4 = hu->priv;
+
+	skb_queue_purge(&h4->txq);
+	kfree_skb(h4->rx_skb);
+	hu->priv = NULL;
+	kfree(h4);
+	return 0;
+}
+
+static int marlin_h4_enqueue(struct hci_uart *hu, struct sk_buff *skb)
+{
+	struct marlin_h4 *h4 = hu->priv;
+
+	memcpy(skb_push(skb, 1), &hci_skb_pkt_type(skb), 1);
+	skb_queue_tail(&h4->txq, skb);
+	return 0;
+}
+
+static const struct h4_recv_pkt marlin_h4_recv_pkts[] = {
+	{ H4_RECV_ACL,   .recv = hci_recv_frame },
+	{ H4_RECV_SCO,   .recv = hci_recv_frame },
+	{ H4_RECV_EVENT, .recv = hci_recv_frame },
+	{ H4_RECV_ISO,   .recv = hci_recv_frame },
+};
+
+static int marlin_h4_recv(struct hci_uart *hu, const void *data, int count)
+{
+	struct marlin_h4 *h4 = hu->priv;
+
+	h4->rx_skb = h4_recv_buf(hu, h4->rx_skb, data, count, marlin_h4_recv_pkts, ARRAY_SIZE(marlin_h4_recv_pkts));
+	if (IS_ERR(h4->rx_skb)) {
+		int err = PTR_ERR(h4->rx_skb);
+
+		bt_dev_err(hu->hdev, "Frame reassembly failed (%d)", err);
+		h4->rx_skb = NULL;
+		return err;
+	}
+	return count;
+}
+
+static struct sk_buff *marlin_h4_dequeue(struct hci_uart *hu)
+{
+	struct marlin_h4 *h4 = hu->priv;
+
+	return skb_dequeue(&h4->txq);
+}
+
+static int marlin_bt_setup(struct hci_uart *hu)
+{
+	struct sprd_marlin *m = g_marlin;
+	u8 pskey[sizeof(marlin_pskey)];
+	struct sk_buff *skb;
+
+	serdev_device_set_flow_control(hu->serdev, true);
+	memcpy(pskey, marlin_pskey, sizeof(pskey));
+	if (m->have_bd_addr)
+		memcpy(pskey + MARLIN_PSKEY_ADDR_OFF, m->bd_addr, 6);
+	skb = __hci_cmd_sync(hu->hdev, MARLIN_PSKEY_OP, sizeof(pskey), pskey, HCI_INIT_TIMEOUT);
+	if (IS_ERR(skb)) {
+		bt_dev_err(hu->hdev, "pskey configuration failed (%ld)", PTR_ERR(skb));
+		return PTR_ERR(skb);
+	}
+	bt_dev_info(hu->hdev, "controller configured (%d bytes of reply)", skb->len);
+	kfree_skb(skb);
+	return 0;
+}
+
+static const struct hci_uart_proto marlin_h4p = {
+	.id		= HCI_UART_H4,
+	.name		= "sc2331",
+	.manufacturer	= 65535,
+	.init_speed	= MARLIN_BT_BAUD,
+	.open		= marlin_h4_open,
+	.close		= marlin_h4_close,
+	.flush		= marlin_h4_flush,
+	.setup		= marlin_bt_setup,
+	.recv		= marlin_h4_recv,
+	.enqueue	= marlin_h4_enqueue,
+	.dequeue	= marlin_h4_dequeue,
+};
+
+int sprd_marlin_bt_start(const u8 *bd_addr)
+{
+	struct sprd_marlin *m = g_marlin;
+	int ret;
+
+	if (!m)
+		return -ENODEV;
+	if (m->bt_up)
+		return -EBUSY;
+	if (bd_addr) {
+		memcpy(m->bd_addr, bd_addr, 6);
+		m->have_bd_addr = true;
+	}
+	if (m->serdev_open) {			/* the loader is done with the port */
+		serdev_device_close(m->serdev);
+		m->serdev_open = false;
+	}
+	m->hu.serdev = m->serdev;
+	serdev_device_set_drvdata(m->serdev, &m->hu);
+	ret = hci_uart_register_device(&m->hu, &marlin_h4p);
+	if (ret) {
+		dev_err(&m->serdev->dev, "cannot register the Bluetooth controller: %d\n", ret);
+		return ret;
+	}
+	m->bt_up = true;
+	dev_info(&m->serdev->dev, "Bluetooth controller registered\n");
+	return 0;
+}
+EXPORT_SYMBOL_GPL(sprd_marlin_bt_start);
+
+void sprd_marlin_bt_stop(void)
+{
+	struct sprd_marlin *m = g_marlin;
+
+	if (m && m->bt_up) {
+		hci_uart_unregister_device(&m->hu);
+		m->bt_up = false;
+	}
+}
+EXPORT_SYMBOL_GPL(sprd_marlin_bt_stop);
+#endif /* CONFIG_BT_HCIUART_SERDEV */
 
 static const struct of_device_id sprd_marlin_of_match[] = {
 	{ .compatible = "sprd,sc2331-marlin" },
