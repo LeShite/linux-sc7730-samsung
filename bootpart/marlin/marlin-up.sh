@@ -9,7 +9,11 @@ L=/boot/marlin/marlin.log
 	if [ ! -e /dev/marlin ]; then echo "no aparecio /dev/marlin"; exit 1; fi
 	cd /boot/marlin && python3 -u marlin_up.py || { echo "marlin_up fallo"; exit 1; }
 	# firmware running and calibrated: register wlan0 (kernel sprd-sc2331-wlan)
-	echo 1 >/sys/devices/virtual/misc/marlin/wlan && echo "wlan0 registrada"
+	# a MAC of our own, made once and kept (locally administered, so it cannot clash with a real one)
+	if ! grep -qE '^([0-9a-f]{2}:){5}[0-9a-f]{2}$' /boot/marlin/mac 2>/dev/null; then
+		od -An -N5 -tx1 /dev/urandom | awk '{printf "02:%s:%s:%s:%s:%s\n", $1, $2, $3, $4, $5}' >/boot/marlin/mac
+	fi
+	echo "1 $(cat /boot/marlin/mac)" >/sys/devices/virtual/misc/marlin/wlan && echo "wlan0 registrada, MAC $(cat /boot/marlin/mac)"
 	# Batocera's connman started before wlan0 existed and left WiFi switched off: switch it on now,
 	# if the user has WiFi enabled in the Batocera menu (wifi.enabled=1 in batocera.conf)
 	if [ "$(batocera-settings-get -f /userdata/system/batocera.conf wifi.enabled 2>/dev/null)" = "1" ]; then
