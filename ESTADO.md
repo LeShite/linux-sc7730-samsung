@@ -1168,3 +1168,12 @@ hay que dárselo al AP (REG_AON_APB_VBC_CTRL, AP_WPROT_EN b6).
 
 ## v70 — acceso crudo a UART0 para depurar el BT (27 oct), compilado
 - tag v70-uart-raw, patches/0046, out/boot-gtex-v70.img, build-79.log. /dev/marlin-uart (write/read crudo, 2 s de espera) + sysfs baud/flow/raw en /sys/devices/virtual/misc/marlin-uart/ (raw=1 hace que los bytes vayan al dispositivo y no al analizador BSL). tools/marlin/uarttest.py prueba un HCI Reset a varias velocidades con y sin flujo, con wake_out alto. Solo con el BT apagado.
+
+## v70 PROBADA — el Bluetooth del Marlin NO contesta por UART0 en ninguna configuración (27 oct, 22:50)
+- v70 flasheada: /dev/marlin-uart y sysfs baud/flow/raw funcionan. Pruebas (tools/marlin/uarttest.py, uart2.py, watch.py; wake_out alto, BT del kernel apagado):
+  * HCI Reset (01 03 0c 00) y el comando pskey completo (01 a0 fc c4 + 196 bytes) a 3 000 000, 115 200, 921 600, 1 500 000, 1 000 000, 460 800, 2 000 000 y 4 000 000 baudios, con y sin control de flujo de hardware => **cero bytes de respuesta en todos los casos**.
+  * Vigilancia continua (HCI Reset a 3 Mbaud sin flujo) desde que aparece /dev/marlin (arranque del firmware) y ~100 s después: nada.
+  * Con el flujo activo la TX se atasca (CTS no llega): el RTS del chip no se activa => el lado BT del chip no está activo / su UART no está inicializada.
+- Pines de UART0 correctos (AF0 los 4). Nada en wcnd/libbt-vendor/mdbg/engpc enciende el BT con un AT (solo at+cp2sleep, at+armlog, at+loopcheck, at+aptime); la vía de Samsung es: wcnd arranca CP2 (BT-OPEN) y libbt-vendor abre el UART, manda el pskey y sigue con HCI. Lo que falta es algo que NO está en esas rutas.
+- **Efectos laterales de esta sesión:** (1) reintentos del BT del kernel => audio cortado (apagado => bien); (2) tras mis pruebas con el reposo del Wi-Fi activo ("idle_sleep_ms"), el chip dejó de despertar ("chip did not wake up") y hubo que reiniciar: para experimentos con el UART poner idle_sleep_ms=0 y no mandar basura a baudios raros.
+- Ideas que quedan: (a) capturar lo que hace el Android real: arrancar el kernel de Samsung en TWRP y ejecutar un programa propio estilo tplay (marlinctl) que haga download + abrir ttyS0 y mande el pskey, comparando; (b) buscar si el BT del chip necesita un pin de enable (¿GPIO 84 "no need"? o el pin de reset?) o un comando por el canal AT (chn 11) del firmware; (c) revisar si el SM-T280 usa el BT por otro bus. El Wi-Fi no depende de esto.
