@@ -1,0 +1,177 @@
+From 7679534302818e21bf560c8b8b1c7d357b8d6ab9 Mon Sep 17 00:00:00 2001
+From: gtex-port <igomezv0921@gmail.com>
+Date: Mon, 26 Oct 2026 22:23:06 -0600
+Subject: [PATCH] marlin: /dev/marlin-uart raw access to UART0 for Bluetooth
+ bring-up (v70)
+
+Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>
+---
+ drivers/misc/sprd-sc2331-marlin.c | 109 +++++++++++++++++++++++++++++-
+ 1 file changed, 108 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/misc/sprd-sc2331-marlin.c b/drivers/misc/sprd-sc2331-marlin.c
+index e5e1a5df6..42e749251 100644
+--- a/drivers/misc/sprd-sc2331-marlin.c
++++ b/drivers/misc/sprd-sc2331-marlin.c
+@@ -8,7 +8,11 @@
+ #include <linux/delay.h>
+ #include <linux/firmware.h>
+ #include <linux/gpio/consumer.h>
++#include <linux/fs.h>
+ #include <linux/jiffies.h>
++#include <linux/kfifo.h>
++#include <linux/miscdevice.h>
++#include <linux/uaccess.h>
+ #include <linux/kernel.h>
+ #include <linux/ktime.h>
+ #include <linux/workqueue.h>
+@@ -57,7 +61,9 @@ struct sprd_marlin {
+ 	struct regulator_bulk_data supplies[2];
+ 	struct device_node *sdio_host;
+ 	struct work_struct work;
+-	bool serdev_open, bt_up, have_bd_addr;
++	bool serdev_open, bt_up, have_bd_addr, raw;
++	DECLARE_KFIFO(rawfifo, u8, 4096);
++	wait_queue_head_t raw_wait;
+ 	u8 bd_addr[6];
+ #if IS_ENABLED(CONFIG_BT_HCIUART_SERDEV)
+ 	struct hci_uart hu;
+@@ -136,6 +142,11 @@ static size_t sprd_marlin_receive_buf(struct serdev_device *serdev,
+ 	bool wake = false;
+ 	size_t i;
+ 
++	if (READ_ONCE(marlin->raw)) {		/* bring-up: /dev/marlin-uart gets the bytes as they are */
++		kfifo_in(&marlin->rawfifo, data, count);
++		wake_up_interruptible(&marlin->raw_wait);
++		return count;
++	}
+ 	spin_lock_irqsave(&marlin->rx_lock, flags);
+ 	for (i = 0; i < count; i++) {
+ 		u8 byte = data[i];
+@@ -487,6 +498,93 @@ static void sprd_marlin_work(struct work_struct *work)
+ 	dev_info(dev, "SDIO1 rescan requested after FDL1 startup\n");
+ }
+ 
++/* ---- bring-up aid: raw access to UART0 (python, no rebuilds) ------------------------------------------
++ * /dev/marlin-uart: write = bytes out, read = bytes in (2 s timeout). sysfs next to it: baud, flow (0/1),
++ * raw (1 = bytes go to the device instead of the BootROM parser). Use only while the Bluetooth is off.
++ */
++static ssize_t raw_write(struct file *f, const char __user *ubuf, size_t n, loff_t *pos)
++{
++	struct sprd_marlin *m = g_marlin;
++	u8 buf[512];
++	size_t done = 0;
++
++	if (!m || !m->serdev_open)
++		return -ENODEV;
++	while (done < n) {
++		size_t c = min(n - done, sizeof(buf));
++		int w;
++
++		if (copy_from_user(buf, ubuf + done, c))
++			return -EFAULT;
++		w = serdev_device_write(m->serdev, buf, c, msecs_to_jiffies(1000));
++		if (w < 0)
++			return w;
++		done += w;
++		if (w < c)
++			break;
++	}
++	serdev_device_wait_until_sent(m->serdev, msecs_to_jiffies(1000));
++	return done;
++}
++
++static ssize_t raw_read(struct file *f, char __user *ubuf, size_t n, loff_t *pos)
++{
++	struct sprd_marlin *m = g_marlin;
++	unsigned int copied;
++	int ret;
++
++	if (!m)
++		return -ENODEV;
++	if (wait_event_interruptible_timeout(m->raw_wait, !kfifo_is_empty(&m->rawfifo), msecs_to_jiffies(2000)) <= 0)
++		return 0;
++	ret = kfifo_to_user(&m->rawfifo, ubuf, n, &copied);
++	return ret ?: copied;
++}
++
++static const struct file_operations raw_fops = {
++	.owner = THIS_MODULE,
++	.write = raw_write,
++	.read = raw_read,
++};
++
++static struct miscdevice raw_misc = { .minor = MISC_DYNAMIC_MINOR, .name = "marlin-uart", .fops = &raw_fops };
++
++static ssize_t baud_store(struct device *dev, struct device_attribute *a, const char *buf, size_t n)
++{
++	unsigned int baud;
++
++	if (!g_marlin || kstrtouint(buf, 0, &baud))
++		return -EINVAL;
++	baud = serdev_device_set_baudrate(g_marlin->serdev, baud);
++	dev_info(dev, "UART0 now %u baud\n", baud);
++	return n;
++}
++static DEVICE_ATTR_WO(baud);
++
++static ssize_t flow_store(struct device *dev, struct device_attribute *a, const char *buf, size_t n)
++{
++	bool on;
++
++	if (!g_marlin || kstrtobool(buf, &on))
++		return -EINVAL;
++	serdev_device_set_flow_control(g_marlin->serdev, on);
++	return n;
++}
++static DEVICE_ATTR_WO(flow);
++
++static ssize_t raw_store(struct device *dev, struct device_attribute *a, const char *buf, size_t n)
++{
++	bool on;
++
++	if (!g_marlin || kstrtobool(buf, &on))
++		return -EINVAL;
++	kfifo_reset(&g_marlin->rawfifo);
++	WRITE_ONCE(g_marlin->raw, on);
++	return n;
++}
++static DEVICE_ATTR_WO(raw);
++
++
+ static int sprd_marlin_probe(struct serdev_device *serdev)
+ {
+ 	struct device *dev = &serdev->dev;
+@@ -530,6 +628,13 @@ static int sprd_marlin_probe(struct serdev_device *serdev)
+ 	dev_info(dev, "UART0 configured for %u baud\n", baud);
+ 
+ 	g_marlin = marlin;
++	INIT_KFIFO(marlin->rawfifo);
++	init_waitqueue_head(&marlin->raw_wait);
++	if (!misc_register(&raw_misc)) {
++		device_create_file(raw_misc.this_device, &dev_attr_baud);
++		device_create_file(raw_misc.this_device, &dev_attr_flow);
++		device_create_file(raw_misc.this_device, &dev_attr_raw);
++	}
+ 	INIT_WORK(&marlin->work, sprd_marlin_work);
+ 	schedule_work(&marlin->work);
+ 	return 0;
+@@ -540,6 +645,7 @@ static void sprd_marlin_remove(struct serdev_device *serdev)
+ 	struct sprd_marlin *marlin = g_marlin;
+ 
+ 	sprd_marlin_bt_stop();
++	misc_deregister(&raw_misc);
+ 	cancel_work_sync(&marlin->work);
+ 	if (marlin->serdev_open)
+ 		serdev_device_close(serdev);
+@@ -731,6 +837,7 @@ void sprd_marlin_bt_stop(void)
+ EXPORT_SYMBOL_GPL(sprd_marlin_bt_stop);
+ #endif /* CONFIG_BT_HCIUART_SERDEV */
+ 
++
+ static const struct of_device_id sprd_marlin_of_match[] = {
+ 	{ .compatible = "sprd,sc2331-marlin" },
+ 	{}
+-- 
+2.56.0
+
