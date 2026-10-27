@@ -23,7 +23,8 @@ L=/boot/marlin/marlin.log
 		echo "connman: WiFi activado"
 	fi
 	# Bluetooth: HCI over UART0 once the firmware runs; its BD address = our MAC + 1 (same stable device)
-	if [ "$(batocera-settings-get -f /userdata/system/batocera.conf controllers.bluetooth.enabled 2>/dev/null)" != "0" ]; then
+	# OFF by default: the controller does not answer yet and its retries make the audio glitch. touch /boot/marlin/bt-enable to try it.
+	if [ -e /boot/marlin/bt-enable ]; then
 		MAC=$(cat /boot/marlin/mac)
 		LAST=$(( (0x${MAC##*:} + 1) & 255 ))
 		BD=$(printf '%s:%02x' "${MAC%:*}" "$LAST")
