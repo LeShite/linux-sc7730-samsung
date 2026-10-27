@@ -688,3 +688,11 @@ config SPRD_MARLIN_SDIO
 	  Talks to the Marlin WiFi/BT chip over SDIO channels once the FDL1
 	  loader has started it, and exposes /dev/marlin for experiments.
 
+config SPRD_SC2331_WLAN
+	bool "Spreadtrum SC2331 (Marlin) WiFi station driver"
+	depends on SPRD_MARLIN_SDIO && CFG80211
+	help
+	  cfg80211 driver for the WiFi of the Marlin chip (Samsung Galaxy Tab A
+	  7.0 SM-T280): scan, connect and Ethernet frames over the SDIO channels.
+	  echo 1 > /sys/devices/virtual/misc/marlin/wlan registers wlan0.
+

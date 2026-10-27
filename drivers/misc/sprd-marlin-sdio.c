@@ -25,6 +25,7 @@
 #include <linux/mutex.h>
 #include <linux/of.h>
 #include <linux/slab.h>
+#include <linux/sprd-marlin-sdio.h>
 #include <linux/uaccess.h>
 #include <linux/wait.h>
 
@@ -43,6 +44,8 @@ struct marlin_sdio {
 	struct mutex lock;
 	wait_queue_head_t wait;
 	bool irq_seen;
+	void (*irq_cb)(void *);
+	void *irq_cb_data;
 	u8 *buf;
 };
 
@@ -80,12 +83,60 @@ static int chn_len(struct marlin_sdio *m, unsigned int chn)
 	return b[0] | b[1] << 8 | b[2] << 16;
 }
 
+struct marlin_sdio *marlin_sdio_get(void)
+{
+	return marlin;
+}
+
+struct device *marlin_sdio_dev(struct marlin_sdio *m)
+{
+	return &m->func->dev;
+}
+
+int marlin_sdio_chn_status(struct marlin_sdio *m, u16 *status)
+{
+	return chn_status(m, status);
+}
+
+int marlin_sdio_chn_len(struct marlin_sdio *m, unsigned int chn)
+{
+	return chn_len(m, chn);
+}
+
+int marlin_sdio_chn_read(struct marlin_sdio *m, unsigned int chn, void *buf, int len)
+{
+	int ret;
+
+	sdio_claim_host(m->func);
+	ret = sdio_memcpy_fromio(m->func, buf, chn, len);
+	sdio_release_host(m->func);
+	return ret;
+}
+
+int marlin_sdio_chn_write(struct marlin_sdio *m, unsigned int chn, const void *buf, int len)
+{
+	int ret;
+
+	sdio_claim_host(m->func);
+	ret = sdio_memcpy_toio(m->func, chn, (void *)buf, len);
+	sdio_release_host(m->func);
+	return ret;
+}
+
+void marlin_sdio_set_irq_cb(struct marlin_sdio *m, void (*cb)(void *), void *data)
+{
+	m->irq_cb_data = data;
+	m->irq_cb = cb;
+}
+
 static irqreturn_t marlin_irq(int irq, void *data)
 {
 	struct marlin_sdio *m = data;
 
 	m->irq_seen = true;
 	wake_up(&m->wait);
+	if (m->irq_cb)
+		m->irq_cb(m->irq_cb_data);
 	return IRQ_HANDLED;
 }
 
@@ -186,6 +237,26 @@ static ssize_t status_show(struct device *dev, struct device_attribute *attr, ch
 }
 static DEVICE_ATTR_RO(status);
 
+/* echo 1 > wlan, once the firmware runs (marlin-up.sh): registers wlan0; 0 removes it */
+static ssize_t wlan_store(struct device *dev, struct device_attribute *attr, const char *buf, size_t n)
+{
+	struct marlin_sdio *m = marlin;
+	bool on;
+	int ret = kstrtobool(buf, &on);
+
+	if (ret)
+		return ret;
+	if (!m)
+		return -ENODEV;
+	if (on) {
+		ret = sc2331_wlan_start(m);
+		return ret ?: n;
+	}
+	sc2331_wlan_stop();
+	return n;
+}
+static DEVICE_ATTR_WO(wlan);
+
 static int marlin_probe(struct sdio_func *func, const struct sdio_device_id *id)
 {
 	struct device_node *np = of_find_compatible_node(NULL, NULL, "sprd,sc2331-marlin");
@@ -238,7 +309,8 @@ static int marlin_probe(struct sdio_func *func, const struct sdio_device_id *id)
 	sdio_set_drvdata(func, m);
 	ret = misc_register(&marlin_misc);
 	if (!ret)
-		ret = device_create_file(marlin_misc.this_device, &dev_attr_status);
+		ret = device_create_file(marlin_misc.this_device, &dev_attr_status) ?:
+		      device_create_file(marlin_misc.this_device, &dev_attr_wlan);
 	dev_info(&func->dev, "Marlin SDIO function 1 enabled, /dev/marlin %s, irq %d\n", ret ? "FAILED" : "ready", m->irq);
 	return ret;
 err:
@@ -252,6 +324,8 @@ static void marlin_remove(struct sdio_func *func)
 	struct marlin_sdio *m = sdio_get_drvdata(func);
 
 	marlin = NULL;
+	sc2331_wlan_stop();
+	device_remove_file(marlin_misc.this_device, &dev_attr_wlan);
 	device_remove_file(marlin_misc.this_device, &dev_attr_status);
 	misc_deregister(&marlin_misc);
 	if (m->irq)
