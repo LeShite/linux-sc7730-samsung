@@ -79,6 +79,8 @@ int sdhci_sprd_sc8830_rescan_sdio(struct device_node *np)
 
 	WRITE_ONCE(host->mmc->caps2,
 		   READ_ONCE(host->mmc->caps2) & ~MMC_CAP2_NO_SDIO);
+	/* a non-removable card is scanned only once at boot (rescan_entered); allow one more scan */
+	host->mmc->rescan_entered = 0;
 	mmc_detect_change(host->mmc, msecs_to_jiffies(100));
 out_put:
 	put_device(&pdev->dev);

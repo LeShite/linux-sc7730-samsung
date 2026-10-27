@@ -10,6 +10,8 @@
 #include <linux/gpio/consumer.h>
 #include <linux/jiffies.h>
 #include <linux/kernel.h>
+#include <linux/ktime.h>
+#include <linux/workqueue.h>
 #include <linux/mmc/host.h>
 #include <linux/mmc/sdhci-sprd-sc8830.h>
 #include <linux/module.h>
@@ -47,6 +49,7 @@ struct sprd_marlin {
 	struct gpio_desc *reset;
 	struct regulator_bulk_data supplies[2];
 	struct device_node *sdio_host;
+	struct work_struct work;
 	const char *firmware_name;
 	u32 fdl_load_address;
 	spinlock_t rx_lock;
@@ -325,6 +328,7 @@ static int sprd_marlin_load_fdl(struct sprd_marlin *marlin)
 	const struct firmware *fw;
 	u8 start[8];
 	size_t offset;
+	ktime_t t0;
 	int ret;
 
 	ret = request_firmware(&fw, marlin->firmware_name,
@@ -340,13 +344,16 @@ static int sprd_marlin_load_fdl(struct sprd_marlin *marlin)
 		goto out_release;
 	}
 
+	t0 = ktime_get();
 	ret = sprd_marlin_sync(marlin);
 	if (ret)
 		goto out_release;
+	dev_info(&marlin->serdev->dev, "sync %lld ms\n", ktime_to_ms(ktime_sub(ktime_get(), t0)));
 
 	ret = sprd_marlin_expect_ack(marlin, MARLIN_CMD_CONNECT, NULL, 0);
 	if (ret)
 		goto out_release;
+	dev_info(&marlin->serdev->dev, "connect acked %lld ms\n", ktime_to_ms(ktime_sub(ktime_get(), t0)));
 
 	start[0] = marlin->fdl_load_address >> 24;
 	start[1] = marlin->fdl_load_address >> 16;
@@ -368,6 +375,9 @@ static int sprd_marlin_load_fdl(struct sprd_marlin *marlin)
 					     fw->data + offset, chunk);
 		if (ret)
 			goto out_release;
+		if (!offset)
+			dev_info(&marlin->serdev->dev, "first chunk acked %lld ms\n",
+				 ktime_to_ms(ktime_sub(ktime_get(), t0)));
 	}
 
 	ret = sprd_marlin_expect_ack(marlin, MARLIN_CMD_END_DATA, NULL, 0);
@@ -429,12 +439,45 @@ static int sprd_marlin_power_on(struct sprd_marlin *marlin)
 	return 0;
 }
 
+/* the BootROM dance takes a long while: run it off the boot path */
+static void sprd_marlin_work(struct work_struct *work)
+{
+	struct sprd_marlin *marlin = container_of(work, struct sprd_marlin, work);
+	struct device *dev = &marlin->serdev->dev;
+	int ret, i;
+
+	ret = sprd_marlin_power_on(marlin);
+	if (ret) {
+		return;
+	}
+
+	ret = sprd_marlin_load_fdl(marlin);
+	if (ret) {
+		dev_err(dev, "FDL1 download failed: %d\n", ret);
+		return;
+	}
+
+	/* The SDHCI node is registered separately and probes asynchronously. */
+	for (i = 0; i < 50; i++) {
+		ret = sdhci_sprd_sc8830_rescan_sdio(marlin->sdio_host);
+		if (ret != -EPROBE_DEFER)
+			break;
+		msleep(100);
+	}
+	if (ret) {
+		dev_err(dev, "SDIO1 host is not ready: %d\n", ret);
+		return;
+	}
+
+	dev_info(dev, "SDIO1 rescan requested after FDL1 startup\n");
+}
+
 static int sprd_marlin_probe(struct serdev_device *serdev)
 {
 	struct device *dev = &serdev->dev;
 	struct sprd_marlin *marlin;
 	unsigned int baud;
-	int ret, i;
+	int ret;
 
 	marlin = devm_kzalloc(dev, sizeof(*marlin), GFP_KERNEL);
 	if (!marlin)
@@ -469,31 +512,8 @@ static int sprd_marlin_probe(struct serdev_device *serdev)
 	serdev_device_set_flow_control(serdev, false);
 	dev_info(dev, "UART0 configured for %u baud\n", baud);
 
-	ret = sprd_marlin_power_on(marlin);
-	if (ret) {
-		of_node_put(marlin->sdio_host);
-		return ret;
-	}
-
-	ret = sprd_marlin_load_fdl(marlin);
-	if (ret) {
-		of_node_put(marlin->sdio_host);
-		return dev_err_probe(dev, ret, "FDL1 download failed\n");
-	}
-
-	/* The SDHCI node is registered separately and probes asynchronously. */
-	for (i = 0; i < 50; i++) {
-		ret = sdhci_sprd_sc8830_rescan_sdio(marlin->sdio_host);
-		if (ret != -EPROBE_DEFER)
-			break;
-		msleep(100);
-	}
-	if (ret) {
-		of_node_put(marlin->sdio_host);
-		return dev_err_probe(dev, ret, "SDIO1 host is not ready\n");
-	}
-
-	dev_info(dev, "SDIO1 rescan requested after FDL1 startup\n");
+	INIT_WORK(&marlin->work, sprd_marlin_work);
+	schedule_work(&marlin->work);
 	return 0;
 }
 
@@ -501,6 +521,7 @@ static void sprd_marlin_remove(struct serdev_device *serdev)
 {
 	struct sprd_marlin *marlin = serdev_device_get_drvdata(serdev);
 
+	cancel_work_sync(&marlin->work);
 	if (marlin->reset)
 		gpiod_set_value_cansleep(marlin->reset, 1);
 	of_node_put(marlin->sdio_host);
