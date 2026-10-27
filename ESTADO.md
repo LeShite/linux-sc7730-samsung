@@ -1099,3 +1099,8 @@ hay que dárselo al AP (REG_AON_APB_VBC_CTRL, AP_WPROT_EN b6).
   El firmware hace él mismo el handshake de 4 vías a partir de la PMK (wiphy con NL80211_EXT_FEATURE_4WAY_HANDSHAKE_STA_PSK; wpa_supplicant le pasa la PMK en connect).
 - Activación: `echo 1 > /sys/devices/virtual/misc/marlin/wlan` (lo hace /boot/marlin/marlin-up.sh tras la calibración) registra wlan0; `echo 0` la quita.
 - Por probar tras flashear: `ip link set wlan0 up` (SET_DEV_OPEN, 8 s), `iw dev wlan0 scan`, `wpa_supplicant`/connmand con una red real. Sin probar nada en la tablet todavía; riesgos: formato exacto de algunos comandos (escaneo, ESSID), MAC aleatoria por arranque, el CP duerme si no se mantiene wake_out (GPIO 46).
+
+## v64 PROBADA — wlan0 EXISTE Y ESCANEA (26 oct, 20:35)
+- v64 flasheada. Arranque automático: marlin-up.sh termina a uptime 26.8 s con "wlan0 registrada" (FDL1 a 20 s, firmware+calibración ~6 s después). `wlan0` aparece (MAC aleatoria 3e:79:...), `ip link set wlan0 up` OK (SET_DEV_OPEN respondió),
+  **`iw dev wlan0 scan` devuelve redes reales** con canal y señal (Share 2.4 -65 dBm, Totalplay, IZZI, INFINITUM, ARTCOUSTIX...; 28 BSS en el segundo escaneo). El formato de comandos del escaneo, la cola TX/RX y el análisis de eventos (REPORT_SCAN_FRAME ops 0/1) funcionan.
+- Pendiente: conectar a una red con wpa_supplicant (PMK por NL80211_ATTR_PMK), DHCP, tráfico de datos (TX con el relleno de 34 bytes por trama), MAC estable, wake_out/sleep, BT. Escaneo con SSID en blanco muestra algunas redes ocultas.
