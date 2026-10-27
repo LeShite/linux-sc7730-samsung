@@ -31,8 +31,9 @@ def f_midst_header(total):
 def f_end():
     return hdr(4, 3, 0xffff) + b"\0\0\0\0"
 
-def f_exec():
-    return hdr(0, 4, 0xffff)
+def f_exec(addr):
+    p = struct.pack(">I", addr)
+    return hdr(4, 4, csum(p)) + p
 
 def chn_len(n):
     for l in bsl.status().splitlines():
