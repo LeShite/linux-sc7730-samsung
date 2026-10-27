@@ -299,7 +299,7 @@ static void evt_disconnect(struct sc2331 *sc, const u8 *p, int len)
 static void rx_event(struct sc2331 *sc, u8 evt, const u8 *p, int len)
 {
 	if (evt == 144)				/* firmware version string, right after the firmware starts */
-		dev_info(sc->wiphy->dev.parent, "firmware %.*s\n", len > 4 ? len - 4 : 0, p + 4);
+		dev_info(sc->wiphy->dev.parent, "firmware %.*s\n", len > 8 ? len - 8 : 0, p + 8);
 	else if (evt != EVT_REPORT_SCAN_FRAME)
 		dev_dbg(sc->wiphy->dev.parent, "event %u len %d: %*ph\n", evt, len, min(len, 32), p);
 	switch (evt) {
@@ -960,6 +960,7 @@ int sc2331_wlan_start(struct marlin_sdio *m, const u8 *mac)
 	if (ret)
 		goto err_netdev;
 
+	marlin_sdio_wake(m);			/* the thread starts with the chip awake */
 	sc->task = kthread_run(sc_thread, sc, "sc2331");
 	if (IS_ERR(sc->task)) {
 		ret = PTR_ERR(sc->task);

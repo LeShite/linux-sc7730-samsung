@@ -327,8 +327,8 @@ static int marlin_probe(struct sdio_func *func, const struct sdio_device_id *id)
 		m->data_irq = fwnode_gpiod_get_index(of_fwnode_handle(np), "data-irq", 0, GPIOD_IN, "marlin-irq");
 		if (IS_ERR(m->data_irq))
 			m->data_irq = NULL;
-		/* held high (chip awake) until the WiFi driver takes over the sleep policy */
-		m->wake_out = fwnode_gpiod_get_index(of_fwnode_handle(np), "wake-out", 0, GPIOD_OUT_HIGH, "marlin-wake-out");
+		/* LOW like the vendor driver: with it high while the firmware boots, the SDIO side never answers */
+		m->wake_out = fwnode_gpiod_get_index(of_fwnode_handle(np), "wake-out", 0, GPIOD_OUT_LOW, "marlin-wake-out");
 		m->wake_ack = fwnode_gpiod_get_index(of_fwnode_handle(np), "wake-ack", 0, GPIOD_IN, "marlin-wake-ack");
 		if (IS_ERR(m->wake_out) || IS_ERR(m->wake_ack))
 			m->wake_out = m->wake_ack = NULL;
